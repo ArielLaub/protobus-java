@@ -35,13 +35,22 @@ class LifecycleTest extends MemoryBus {
 
     @Test
     void aHandlerOutlivingItsTimeoutStillCountsAsRunning() {
-        CalcService s = serve(MessageServiceOptions.DEFAULT.withProcessingTimeoutMs(30)
-                .withRetry(RetryOptions.defaults().withMaxRetries(0)));
-        // Ignores its signal: sleeps regardless.
-        CompletableFuture<?> call = proxy().slowAsync(SlowRequest.newBuilder().setMs(1).build());
-        call.join();
+        // A handler that ignores its signal: the timeout settles its delivery, but
+        // it is still running, and a drain must wait for it.
+        serve((c, o) -> new CalcService(c, o) {
+            @Override
+            public pbtest.Nothing slow(SlowRequest r, CallContext ctx) throws InterruptedException {
+                Thread.sleep(r.getMs());
+                return pbtest.Nothing.getDefaultInstance();
+            }
+        }, MessageServiceOptions.DEFAULT.withProcessingTimeoutMs(30)
+                .withRetry(RetryOptions.defaults().withMaxRetries(0)), ctx);
+        RemoteError e = assertThrows(RemoteError.class, () -> proxy().slow(SlowRequest.newBuilder().setMs(500).build()));
+        assertEquals("PROCESSING_TIMEOUT", e.code());
+        assertEquals(1, ctx.connection().inFlightDeliveries());
+        assertFalse(ctx.connection().drainInFlight(50));
+        assertTrue(ctx.connection().drainInFlight(5000));
         assertEquals(0, ctx.connection().inFlightDeliveries());
-        assertTrue(s.slowStarted.get() >= 1);
     }
 
     @Test
