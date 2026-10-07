@@ -96,6 +96,10 @@ public final class Context implements AutoCloseable {
         return factory;
     }
 
+    MessageDispatcher messageDispatcher() {
+        return messageDispatcher;
+    }
+
     public Connection connection() {
         return connection;
     }

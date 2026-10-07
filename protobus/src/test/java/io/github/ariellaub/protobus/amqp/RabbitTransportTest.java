@@ -48,4 +48,11 @@ class RabbitTransportTest {
         assertFalse(RabbitTransport.configure("amqp://h/", 30).isAutomaticRecoveryEnabled());
         assertFalse(RabbitTransport.configure("amqp://h/", 30).isTopologyRecoveryEnabled());
     }
+
+    @Test
+    void anUnparseableUrlNeverEchoesItsPassword() {
+        AmqpException e = assertThrows(AmqpException.class,
+                () -> RabbitTransport.configure("amqp://svc:p%ss word@host/", 30));
+        assertFalse(e.getMessage().contains("p%ss"), e.getMessage());
+    }
 }

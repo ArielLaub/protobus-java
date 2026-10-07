@@ -54,7 +54,9 @@ public final class Main {
             System.err.println("protobus-java: " + e.getMessage());
             status = 1;
         }
-        System.exit(status);
+        // Only on failure: run in-process (Maven's exec:java, a Gradle JavaExec in
+        // the same JVM), an exit on success would end the build itself.
+        if (status != 0) System.exit(status);
     }
 
     static final String USAGE = String.join("\n",

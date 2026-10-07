@@ -50,11 +50,20 @@ public abstract class BaseListener {
 
     private Runnable detachRestorer;
     private final Runnable detachDisconnected;
+    private volatile Runnable onQueueReplaced = () -> {};
 
     protected BaseListener(Connection connection) {
         this.connection = connection;
         attachRestorer();
         this.detachDisconnected = connection.onDisconnected(this::onDisconnected);
+    }
+
+    /**
+     * Run {@code listener} when a restoration declared a queue under a new name:
+     * an anonymous queue is server-named, and its replacement is a new one.
+     */
+    public void onQueueReplaced(Runnable listener) {
+        onQueueReplaced = listener == null ? () -> {} : listener;
     }
 
     /** A name for log lines. */
@@ -151,10 +160,18 @@ public abstract class BaseListener {
                 keys = new ArrayList<>(bindings);
                 previous = channel;
             }
+            String previousQueue = queueName();
             Logger.info(listenerName() + ": reconnected, re-initializing...");
             reinitialize();
             AmqpChannel ch = channel();
             String queue = queueName();
+            if (!queue.equals(previousQueue)) {
+                try {
+                    onQueueReplaced.run();
+                } catch (RuntimeException e) {
+                    Logger.error(listenerName() + ": queue-replaced listener failed: " + e);
+                }
+            }
             for (String routingKey : keys) {
                 connection.bindQueue(ch, queue, exchangeName, routingKey);
                 Logger.debug(listenerName() + ": re-bound " + routingKey);
@@ -296,6 +313,9 @@ public abstract class BaseListener {
         options.ordered = orderedDelivery;
         options.buildErrorReply = buildErrorReply;
         options.onCancelled = () -> onConsumerCancelled(tag);
+        // An early-ack consumer gets no prefetch from the broker (the broker sees
+        // each delivery acked at once), so its parallelism is bounded here.
+        options.maxConcurrency = lateAck ? 0 : Math.max(1, maxConcurrent == null ? 1 : maxConcurrent);
         connection.consume(ch, queue, h, options, lateAck, getRetryOptions(), processingTimeoutMs);
         Logger.debug(listenerName() + ": started consuming from " + queue);
     }
@@ -362,6 +382,14 @@ public abstract class BaseListener {
      * shutdown. Safe to call more than once, and when disconnected.
      */
     public void stopConsuming() {
+        // Serialised with restoration, so a restore cannot start a consumer
+        // between its own check of wasStarted and this stop.
+        synchronized (restoreLock) {
+            stopConsumingLocked();
+        }
+    }
+
+    private void stopConsumingLocked() {
         String tag;
         AmqpChannel ch;
         synchronized (lock) {

@@ -1,0 +1,102 @@
+# Configuration
+
+## Environment variables
+
+The same variables, with the same defaults, as every other port. Each is read
+when it is used, so a change at runtime is picked up. Integers must be all
+digits and positive, or the default is kept; booleans are `1/true/yes/on` or
+`0/false/no/off`. `Config.set(name, value)` overrides one inside the process,
+for tests and for applications that cannot set their environment.
+
+| Variable | Default | |
+|---|---|---|
+| `BUS_EXCHANGE_NAME` | `proto.bus` | RPC requests (topic) |
+| `CALLBACKS_EXCHANGE_NAME` | `proto.bus.callback` | RPC replies (direct) |
+| `EVENTS_EXCHANGE_NAME` | `proto.bus.events` | events (topic) |
+| `CANCEL_EXCHANGE_NAME` | `proto.bus.cancel` | stream cancellation (fanout) |
+| `MESSAGE_PROCESSING_TIMEOUT` | 600000 | one attempt at a unary request, ms |
+| `RPC_CALL_TIMEOUT_MS` | 600000 | how long a caller waits, ms |
+| `STREAM_IDLE_TIMEOUT_MS` | 60000 | the longest gap between stream chunks, ms |
+| `STREAM_MAX_BUFFERED_CHUNKS` | 1024 | unconsumed chunks per stream |
+| `STREAM_MAX_BUFFERED_BYTES` | 67108864 | unconsumed bytes per stream |
+| `STREAM_MAX_TOTAL_BUFFERED_BYTES` | 268435456 | unconsumed bytes across a context's streams |
+| `DEFAULT_PREFETCH` | 1 | prefetch for late-ack consumers that set none (event listeners) |
+| `PUBLISH_CONFIRM_TIMEOUT_MS` | 30000 | how long a publish waits for its confirm, ms |
+| `MAX_OUTSTANDING_CONFIRMS` | 256 | unconfirmed publishes per channel; more wait for a slot |
+| `CONNECTION_READY_TIMEOUT_MS` | 30000 | how long a publish waits through a reconnection, ms |
+| `AMQP_HEARTBEAT_SECONDS` | 30 | heartbeat, unless the URL sets `heartbeat` |
+| `SHUTDOWN_DRAIN_TIMEOUT_MS` | 30000 | how long shutdown waits for in-flight work, ms |
+| `PROTOBUS_EXPOSE_INTERNAL_ERRORS` | true | send unhandled errors' messages to callers |
+| `LOG_LEVEL` | info | debug, info, warn, error or silent |
+
+The exchange names are part of the wire protocol: every process on one bus
+must agree on them.
+
+## The broker URL
+
+`amqp://user:password@host:port/vhost`, or `amqps://` for TLS. A trailing `/`
+is the default vhost, as in every port; `%2f` is too. Query parameters:
+`heartbeat` (seconds, 0 disables), `connection_timeout` (ms), `channel_max`,
+and `verify=verify_none` (see [Security](security.md#tls)).
+
+## Context options
+
+<!-- doc-check: compile -->
+```java
+package app;
+
+import io.github.ariellaub.protobus.Connection;
+import io.github.ariellaub.protobus.Context;
+import io.github.ariellaub.protobus.ContextOptions;
+import java.util.concurrent.Executors;
+
+class Setup {
+    static Context context() {
+        Context context = new Context(ContextOptions.DEFAULT
+                // 10 attempts, 1 s doubling to 30 s, each with up to 30% jitter, by default.
+                .withReconnection(Connection.ReconnectionOptions.defaults().withMaxRetries(0)) // 0: forever
+                // Where handlers run; on Java 21, virtual threads.
+                .withHandlerExecutor(Executors.newCachedThreadPool()));
+        context.init(System.getenv("AMQP_URL"));
+        return context;
+    }
+}
+```
+
+A context does not shut down an executor it was given.
+
+## Reconnection
+
+When the connection drops, pending calls and streams fail with
+`DisconnectedError`, and reconnection starts after the backoff delay. Before
+the connection reports itself ready again, every service, listener and
+dispatcher re-opens its channel and re-declares its queues, bindings and
+consumers, in the order they were created; if any of that fails, the attempt
+counts as failed and is retried. Calls made meanwhile wait, up to
+`CONNECTION_READY_TIMEOUT_MS`. After `maxRetries` consecutive failures the
+connection gives up: `onError` listeners hear a `ReconnectionError`, and
+publishes fail with `NotReadyError`.
+
+`context.connection()` reports `isConnected()`, `isReconnecting()` and
+`isReady()`, and takes `onReconnecting`, `onReconnected`, `onDisconnected` and
+`onError` listeners.
+
+A channel that the broker closes while the connection stays up (a consumer
+timeout, a refused acknowledgement) is rebuilt the same way, with backoff, and
+so is a consumer the broker cancels.
+
+## Logging
+
+protobus logs through SLF4J (logger `protobus`) when an SLF4J provider is on
+the class path, and to the console otherwise. `LOG_LEVEL`, or
+`Logger.setLevel`, sets the threshold; `Logger.set(sink)` replaces the sink.
+
+`Log` writes structured records; a sink implementing `LogSink.Structured`
+receives them as `LogRecord`s, any other sink as one formatted line:
+
+```java
+Log.info("published request", Log.fields("publish").correlationId(id).sizeBytes(body.length)
+        .outcome(Log.Outcome.CONFIRMED));
+```
+
+protobus never logs message bodies. See [Security](security.md#logging).

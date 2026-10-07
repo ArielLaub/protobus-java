@@ -59,6 +59,10 @@ public class MessageDispatcher {
         if (initialized) return;
         openPublishChannel();
         callbackListener.init(this::onResult, null);
+        // A reply queue rebuilt on a live connection is a new, server-named queue:
+        // requests in flight name the old one, so their replies will never come.
+        callbackListener.onQueueReplaced(() -> failPending(new DisconnectedError(
+                "the reply queue was replaced while the call was pending")));
         callbackListener.start();
         initialized = true;
     }
@@ -106,7 +110,10 @@ public class MessageDispatcher {
         synchronized (channelLock) {
             channel = null;
         }
-        DisconnectedError error = new DisconnectedError();
+        failPending(new DisconnectedError());
+    }
+
+    private void failPending(DisconnectedError error) {
         for (Map.Entry<String, Pending> e : new ArrayList<>(callbacks.entrySet())) {
             if (callbacks.remove(e.getKey(), e.getValue())) {
                 ScheduledFuture<?> t = e.getValue().timer;
@@ -115,8 +122,6 @@ public class MessageDispatcher {
             }
         }
         for (StreamCall s : new ArrayList<>(pendingStreams.values())) s.fail(error);
-        pendingStreams.clear();
-        totalBufferedBytes.set(0);
     }
 
     /** Off the transport's thread, so a caller's continuation cannot stall reply delivery. */
@@ -245,6 +250,15 @@ public class MessageDispatcher {
         }, limit, TimeUnit.MILLISECONDS);
 
         CompletableFuture<byte[]> result = new CompletableFuture<>();
+        java.util.concurrent.atomic.AtomicBoolean confirmed = new java.util.concurrent.atomic.AtomicBoolean();
+        // The deadline bounds the confirm as well as the reply: a timeout or a
+        // disconnect settles the call at once, without waiting for the confirm.
+        // A reply, though, is only taken once the request is confirmed, because a
+        // failed publish is the more specific answer.
+        pending.reply.whenComplete((reply, replyErr) -> {
+            if (replyErr != null) result.completeExceptionally(replyErr);
+            else if (confirmed.get()) result.complete(reply);
+        });
         connection.publishAsync(ch, Config.busExchangeName(), routingKey, content, publish).whenComplete((mid, err) -> {
             if (err != null) {
                 // The request never made it, so no reply is coming: release the
@@ -253,10 +267,14 @@ public class MessageDispatcher {
                 completeOff(result, null, err);
                 return;
             }
-            pending.reply.whenComplete((reply, replyErr) -> {
-                if (replyErr != null) result.completeExceptionally(replyErr);
-                else result.complete(reply);
-            });
+            confirmed.set(true);
+            // Off the transport's thread: the reply may already be here, and the
+            // caller's continuations must never run on the connection's I/O thread.
+            if (pending.reply.isDone()) {
+                pending.reply.whenComplete((reply, replyErr) -> {
+                    if (replyErr == null) completeOff(result, reply, null);
+                });
+            }
         });
         return result;
     }
@@ -307,6 +325,10 @@ public class MessageDispatcher {
                     return null;
                 });
         return new ChunkStream(stream);
+    }
+
+    int pendingStreamCount() {
+        return pendingStreams.size();
     }
 
     public void close() {
@@ -383,7 +405,9 @@ public class MessageDispatcher {
                 if (idle != null) idle.cancel(false);
                 notifyAll();
             }
-            releaseBuffer();
+            // Released now, keeping the error for the caller: one that never reads
+            // the stream again must not hold its entry or its signal listener.
+            release();
         }
 
         private void releaseBuffer() {

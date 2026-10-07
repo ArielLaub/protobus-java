@@ -232,6 +232,11 @@ public final class Connection {
         public BiFunction<byte[], Throwable, byte[]> buildErrorReply;
         /** Called when the broker cancels the consumer. Runs on the transport's thread: must not block. */
         public Runnable onCancelled;
+        /**
+         * Handlers this consumer runs at once; further deliveries wait in memory.
+         * 0 leaves it to the prefetch, which bounds a late-ack consumer already.
+         */
+        public int maxConcurrency;
     }
 
     public static final class ConsumeRetryOptions {
@@ -491,9 +496,11 @@ public final class Connection {
         }
         doConnect();
         // Nothing to restore on a first connect: components initialise themselves
-        // against it, so the socket coming up is readiness.
+        // against it, so the socket coming up is readiness, unless it has already
+        // gone again, in which case the reconnection it scheduled owns the state.
         List<CompletableFuture<Void>> waiters;
         synchronized (lock) {
+            if (!connected) return;
             reconnecting = false;
             ready = true;
             waiters = new ArrayList<>(readyWaiters);
@@ -940,6 +947,7 @@ public final class Connection {
      */
     public String consume(AmqpChannel channel, String queue, MessageHandler handler, ConsumeOptions options,
                           boolean lateAck, ConsumeRetryOptions retry, Long processingTimeoutMs) {
+        Executor run = options.maxConcurrency > 0 ? new Limited(handlers, options.maxConcurrency) : handlers;
         return channel.consume(queue, options.consumerTag, options.noAck, options.exclusive, delivery -> {
             // Counted for the whole settle, so a graceful shutdown waits for the
             // reply, retry or dead-letter publish and not just the handler body.
@@ -950,16 +958,75 @@ public final class Connection {
                 return;
             }
             try {
-                handlers.execute(() -> handleDelivery(d, handler, processingTimeoutMs));
+                run.execute(() -> handleDelivery(d, handler, processingTimeoutMs));
             } catch (RejectedExecutionException e) {
-                Logger.error("handler executor refused a delivery on " + queue
-                        + "; leaving it unacknowledged for redelivery");
                 deliveryFinished();
+                if (!d.settlesLate()) {
+                    Logger.error("handler executor refused an acknowledged delivery on " + queue + "; it is lost");
+                    return;
+                }
+                // Holding it unacknowledged would keep its prefetch slot for the life
+                // of the channel: hand it back, after a pause.
+                Logger.error("handler executor refused a delivery on " + queue + "; requeueing it in 1 s");
+                timer.schedule(() -> internal.execute(() -> {
+                    try {
+                        channel.reject(delivery.deliveryTag(), true);
+                    } catch (RuntimeException err) {
+                        Logger.debug("requeue failed: " + err.getMessage());
+                    }
+                }), 1000, TimeUnit.MILLISECONDS);
             }
         }, () -> {
             Logger.warn("consumer for " + queue + " was cancelled by the broker");
             if (options.onCancelled != null) safely(options.onCancelled);
         });
+    }
+
+    /** Runs at most {@code limit} tasks at once on {@code target}; the rest wait, in order. */
+    private static final class Limited implements Executor {
+        private final Executor target;
+        private final int limit;
+        private final ArrayDeque<Runnable> waiting = new ArrayDeque<>();
+        private int active;
+
+        Limited(Executor target, int limit) {
+            this.target = target;
+            this.limit = limit;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            synchronized (this) {
+                if (active >= limit) {
+                    waiting.add(task);
+                    return;
+                }
+                active++;
+            }
+            launch(task);
+        }
+
+        private void launch(Runnable task) {
+            try {
+                target.execute(() -> {
+                    try {
+                        task.run();
+                    } finally {
+                        Runnable next;
+                        synchronized (this) {
+                            next = waiting.poll();
+                            if (next == null) active--;
+                        }
+                        if (next != null) launch(next);
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                synchronized (this) {
+                    active--;
+                }
+                throw e;
+            }
+        }
     }
 
     private void handleDelivery(InFlight d, MessageHandler handler, Long processingTimeoutMs) {

@@ -46,3 +46,13 @@ tasks.withType<JavaCompile>().matching { it.name == "compileTestJava" }.configur
     // Generated sources: protoc's own carry raw types and deprecations.
     options.compilerArgs.remove("-Werror")
 }
+
+sourceSets {
+    main {
+        // protobus/types.proto ships in the jar, so a build compiling its own
+        // schemas with protoc (and the com.google.protobuf plugin) can import it.
+        resources.srcDir("src/main/proto")
+    }
+}
+
+tasks.processResources { duplicatesStrategy = DuplicatesStrategy.EXCLUDE }

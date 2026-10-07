@@ -49,3 +49,7 @@ tasks.test {
         systemProperty("protoc", exe.absolutePath)
     }
 }
+
+extensions.configure<PublishingExtension> {
+    publications.named<MavenPublication>("maven") { artifact(fatJar) }
+}

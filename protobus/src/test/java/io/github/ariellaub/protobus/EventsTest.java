@@ -28,7 +28,7 @@ class EventsTest extends MemoryBus {
             topics.add(type + "@" + topic);
         });
         ctx.publishEvent(ping("a"));
-        assertTrue(eventually(() -> got.size() == 1));
+        assertTrue(eventually(() -> topics.size() == 1));
         assertEquals("a", got.get(0));
         assertEquals("pbtest.Ping@EVENT.pbtest.Ping", topics.get(0));
     }

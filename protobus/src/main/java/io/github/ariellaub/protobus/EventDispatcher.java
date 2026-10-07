@@ -86,10 +86,18 @@ public class EventDispatcher {
                 .contentType("application/octet-stream")
                 .deliveryMode(2)
                 .build();
-        return connection.whenReadyAsync()
+        CompletableFuture<Void> done = new CompletableFuture<>();
+        connection.whenReadyAsync()
                 .thenCompose(v -> connection.publishAsync(publishChannel(), Config.eventsExchangeName(), t, event,
                         Connection.PublishOptions.of(props)))
-                .thenApply(mid -> null);
+                // Off the transport's thread: a caller's continuation must never run
+                // on the connection's I/O thread.
+                .whenComplete((mid, err) -> connection.internalExecutor().execute(() -> {
+                    if (err == null) done.complete(null);
+                    else done.completeExceptionally(err instanceof java.util.concurrent.CompletionException
+                            && err.getCause() != null ? err.getCause() : err);
+                }));
+        return done;
     }
 
     public void publish(String type, MessageOrBuilder content, String topic) {

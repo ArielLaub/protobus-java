@@ -25,3 +25,15 @@ for ((task, main) in listOf("runCalculator" to "examples.Calculator", "runTokens
         args = (project.findProperty("args") as String?)?.split(" ") ?: emptyList()
     }
 }
+
+dependencies {
+    testImplementation(platform(libs.junit.bom))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+tasks.test {
+    // The documentation's Java snippets are compiled against these examples' schemas.
+    systemProperty("docs.root", rootProject.projectDir.absolutePath)
+    inputs.files(fileTree(rootProject.projectDir) { include("README.md", "docs/**/*.md") })
+}

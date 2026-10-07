@@ -62,7 +62,13 @@ public final class RabbitTransport implements Transport {
         try {
             factory.setUri(base);
         } catch (Exception e) {
-            throw new AmqpException("invalid broker URL: " + e.getMessage(), 0, e);
+            // Never the message: URISyntaxException quotes the whole input,
+            // password included.
+            String why = e instanceof java.net.URISyntaxException
+                    ? ((java.net.URISyntaxException) e).getReason() + " at index "
+                            + ((java.net.URISyntaxException) e).getIndex()
+                    : e.getClass().getSimpleName();
+            throw new AmqpException("invalid broker URL " + Logger.redactUrl(url) + ": " + why, 0);
         }
         // The AMQP URI spec reads "amqp://host/" as the empty vhost. Every other
         // protobus port reaches the default vhost with it, so this one does too.
