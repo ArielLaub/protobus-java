@@ -264,16 +264,21 @@ class CrossLangTest {
         Process p = launch(lang, "server", lang);
         servers.add(p);
         BufferedReader out = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8));
-        CompletableFuture<Boolean> ready = CompletableFuture.supplyAsync(() -> {
+        // A thread of its own, never a shared pool: it reads for the life of the
+        // server, and five servers' readers would exhaust a small common pool.
+        CompletableFuture<Boolean> ready = new CompletableFuture<>();
+        Thread reader = new Thread(() -> {
             try {
                 for (String l = out.readLine(); l != null; l = out.readLine()) {
-                    if (l.equals("READY")) return true;
+                    if (l.equals("READY")) ready.complete(true);
                 }
-            } catch (IOException e) {
-                return false;
+            } catch (IOException ignored) {
+                // The process ended.
             }
-            return false;
-        });
+            ready.complete(false);
+        }, "peer-" + lang);
+        reader.setDaemon(true);
+        reader.start();
         Boolean ok;
         try {
             ok = ready.get(90, TimeUnit.SECONDS);
@@ -281,16 +286,6 @@ class CrossLangTest {
             ok = false;
         }
         if (!ok) fail(lang + " server did not become ready (alive: " + p.isAlive() + ")\n" + stderrOf(p));
-        // Keep draining its stdout so it can never block on a full pipe.
-        CompletableFuture.runAsync(() -> {
-            try {
-                while (out.readLine() != null) {
-                    // discard
-                }
-            } catch (IOException ignored) {
-                // The process ended.
-            }
-        });
     }
 
     /** Run a peer's client scenario against {@code target}; every check must pass. */

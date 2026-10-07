@@ -9,12 +9,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # The suites never default to a broker; these point them at the service
-  # containers below.
-  PROTOBUS_TEST_AMQP_URL: amqp://guest:guest@127.0.0.1:25672/
-  PROTOBUS_TEST_MGMT_URL: http://guest:guest@127.0.0.1:25673
-
 jobs:
   unit:
     name: unit (${{ matrix.os }}, Java ${{ matrix.java }}, protobuf-java ${{ matrix.protobuf }})
@@ -41,6 +35,11 @@ jobs:
   integration:
     name: integration (RabbitMQ ${{ matrix.rabbitmq }})
     runs-on: ubuntu-24.04
+    # The suites never default to a broker; these point them at the service
+    # container. Set only on the jobs that have one.
+    env:
+      PROTOBUS_TEST_AMQP_URL: amqp://guest:guest@127.0.0.1:25672/
+      PROTOBUS_TEST_MGMT_URL: http://guest:guest@127.0.0.1:25673
     strategy:
       matrix:
         rabbitmq: ["3-management", "4-management"]
@@ -71,6 +70,11 @@ jobs:
   cross-language:
     name: cross-language (Java <-> TypeScript <-> Python <-> Go <-> C++)
     runs-on: ubuntu-24.04
+    # The suites never default to a broker; these point them at the service
+    # container. Set only on the jobs that have one.
+    env:
+      PROTOBUS_TEST_AMQP_URL: amqp://guest:guest@127.0.0.1:25672/
+      PROTOBUS_TEST_MGMT_URL: http://guest:guest@127.0.0.1:25673
     services:
       rabbitmq:
         image: rabbitmq:3-management
