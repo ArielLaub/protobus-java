@@ -20,7 +20,23 @@ subprojects {
         options.compilerArgs.addAll(listOf("-Xlint:all,-serial,-processing,-try,-this-escape", "-Werror"))
     }
 
+    // CI runs the suites on other JDKs and protobuf runtimes than the build's:
+    //   -PtestJava=17                    the JVM the tests run on
+    //   -PprotobufRuntime=4.36.2         the protobuf-java the tests run against
+    val testJava = providers.gradleProperty("testJava").orNull
+    val protobufRuntime = providers.gradleProperty("protobufRuntime").orNull
+    if (protobufRuntime != null) {
+        configurations.matching { it.name.endsWith("RuntimeClasspath") && it.name != "runtimeClasspath" }.configureEach {
+            resolutionStrategy.force("com.google.protobuf:protobuf-java:$protobufRuntime")
+        }
+    }
+
     tasks.withType<Test>().configureEach {
+        if (testJava != null) {
+            javaLauncher.set(extensions.getByType<JavaToolchainService>().launcherFor {
+                languageVersion.set(JavaLanguageVersion.of(testJava.toInt()))
+            })
+        }
         useJUnitPlatform()
         testLogging {
             events("failed", "skipped")
