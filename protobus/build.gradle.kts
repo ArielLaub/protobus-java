@@ -44,3 +44,10 @@ val integrationTest by tasks.registering(Test::class) {
 tasks.test {
     useJUnitPlatform { excludeTags("integration") }
 }
+
+protobusGenerate("test", "src/test/schemas", libs.versions.protobuf.get())
+
+tasks.withType<JavaCompile>().matching { it.name == "compileTestJava" }.configureEach {
+    // Generated sources: protoc's own carry raw types and deprecations.
+    options.compilerArgs.remove("-Werror")
+}

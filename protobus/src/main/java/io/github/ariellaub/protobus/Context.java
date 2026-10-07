@@ -107,13 +107,15 @@ public final class Context implements AutoCloseable {
             if (closed) return;
             closed = true;
         }
+        // Disconnect first: it is what fails pending calls and streams, through
+        // the dispatchers' disconnect listeners, which closing them would detach.
+        connection.disconnect();
         try {
             messageDispatcher.close();
             eventDispatcher.close();
         } catch (RuntimeException e) {
             Logger.debug("Context: closing the dispatchers: " + e.getMessage());
         }
-        connection.disconnect();
         if (!connection.drainInFlight(Config.shutdownDrainTimeoutMs())) {
             Logger.warn("Context: " + connection.inFlightDeliveries() + " handler(s) still running after "
                     + Config.shutdownDrainTimeoutMs() + "ms; closing anyway");
