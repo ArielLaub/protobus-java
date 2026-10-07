@@ -45,6 +45,16 @@ public final class RabbitTransport implements Transport {
 
     @Override
     public AmqpConnection connect(String url, int heartbeatSeconds) {
+        ConnectionFactory factory = configure(url, heartbeatSeconds);
+        try {
+            return new RabbitConnection(factory.newConnection());
+        } catch (IOException | TimeoutException e) {
+            throw wrap("connect", e);
+        }
+    }
+
+    /** The client's factory for a broker URL: credentials, vhost, TLS and the URL's query parameters. */
+    static ConnectionFactory configure(String url, int heartbeatSeconds) {
         ConnectionFactory factory = new ConnectionFactory();
         int q = url.indexOf('?');
         String base = q < 0 ? url : url.substring(0, q);
@@ -54,6 +64,9 @@ public final class RabbitTransport implements Transport {
         } catch (Exception e) {
             throw new AmqpException("invalid broker URL: " + e.getMessage(), 0, e);
         }
+        // The AMQP URI spec reads "amqp://host/" as the empty vhost. Every other
+        // protobus port reaches the default vhost with it, so this one does too.
+        if (factory.getVirtualHost().isEmpty()) factory.setVirtualHost("/");
         if (base.regionMatches(true, 0, "amqps:", 0, 6)) {
             if ("verify_none".equalsIgnoreCase(query.get("verify"))) {
                 Logger.warn("amqps with verify=verify_none: the broker's certificate is NOT verified");
@@ -77,11 +90,7 @@ public final class RabbitTransport implements Transport {
         Map<String, Object> client = new HashMap<>(factory.getClientProperties());
         client.put("connection_name", "protobus-java");
         factory.setClientProperties(client);
-        try {
-            return new RabbitConnection(factory.newConnection());
-        } catch (IOException | TimeoutException e) {
-            throw wrap("connect", e);
-        }
+        return factory;
     }
 
     private static Map<String, String> parseQuery(String query) {
