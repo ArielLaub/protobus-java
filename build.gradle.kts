@@ -31,9 +31,10 @@ subprojects {
         }
     }
 
+    val toolchains = extensions.getByType<JavaToolchainService>()
     tasks.withType<Test>().configureEach {
         if (testJava != null) {
-            javaLauncher.set(extensions.getByType<JavaToolchainService>().launcherFor {
+            javaLauncher.set(toolchains.launcherFor {
                 languageVersion.set(JavaLanguageVersion.of(testJava.toInt()))
             })
         }

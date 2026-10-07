@@ -224,7 +224,8 @@ class IntegrationTest {
         Connection conn = c.connection();
         AmqpChannel ch = conn.openChannel();
         String queue = name;
-        conn.declareQueue(ch, queue, false, false, true, Map.of());
+        // Durable: RabbitMQ 4 refuses a transient queue that is not exclusive.
+        conn.declareQueue(ch, queue, true, false, false, Map.of());
         String exchange = name + ".x";
         conn.declareExchange(ch, exchange, "topic");
         conn.bindQueue(ch, queue, exchange, "routed");
@@ -245,6 +246,7 @@ class IntegrationTest {
             }
         } finally {
             Broker.deleteExchange(exchange);
+            Broker.deleteQueue(queue);
         }
     }
 

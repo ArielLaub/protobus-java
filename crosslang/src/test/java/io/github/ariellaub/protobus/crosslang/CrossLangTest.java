@@ -70,6 +70,17 @@ class CrossLangTest {
     static final HttpClient http = HttpClient.newHttpClient();
 
     final List<Process> servers = new ArrayList<>();
+    final Map<Process, Path> stderr = new java.util.HashMap<>();
+
+    /** The last lines a peer wrote to stderr, for a failure message. */
+    String stderrOf(Process p) {
+        try {
+            List<String> lines = Files.readAllLines(stderr.get(p));
+            return String.join("\n", lines.subList(Math.max(0, lines.size() - 40), lines.size()));
+        } catch (IOException | RuntimeException e) {
+            return "(no stderr: " + e + ")";
+        }
+    }
     String vhost;
     String vhostUrl;
 
@@ -232,8 +243,11 @@ class CrossLangTest {
         pb.environment().put("PROTOBUS_TEST_AMQP", vhostUrl);
         pb.environment().put("PROTOBUS_TEST_PROTO_DIR", HERE.resolve("proto").toString());
         pb.environment().put("PEER_TARGET", target);
-        pb.redirectError(Files.createTempFile("pbjava-peer-" + lang + "-", ".err").toFile());
-        return pb.start();
+        Path err = Files.createTempFile("pbjava-peer-" + lang + "-", ".err");
+        pb.redirectError(err.toFile());
+        Process p = pb.start();
+        stderr.put(p, err);
+        return p;
     }
 
     static void stop(Process p) {
@@ -266,7 +280,7 @@ class CrossLangTest {
         } catch (java.util.concurrent.TimeoutException e) {
             ok = false;
         }
-        if (!ok) fail(lang + " server did not become ready");
+        if (!ok) fail(lang + " server did not become ready (alive: " + p.isAlive() + ")\n" + stderrOf(p));
         // Keep draining its stdout so it can never block on a full pipe.
         CompletableFuture.runAsync(() -> {
             try {
@@ -293,7 +307,7 @@ class CrossLangTest {
         }
         int code = p.waitFor();
         assertTrue(failed.isEmpty(), lang + " client against " + target + ": " + failed);
-        assertTrue(done, lang + " client did not finish (exit " + code + ")");
+        assertTrue(done, lang + " client did not finish (exit " + code + ")\n" + stderrOf(p));
         assertTrue(passed >= 15, lang + " client against " + target + " passed only " + passed + " checks");
     }
 
