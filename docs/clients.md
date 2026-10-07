@@ -57,7 +57,7 @@ a reconnection first waits for it, up to `CONNECTION_READY_TIMEOUT_MS` (30 s).
 | `RpcTimeoutError` | no reply within the timeout | ambiguous: the service may have run it |
 | `UnroutableError` | no service is bound to the routing key | safe |
 | `PublishNackedError` | the broker refused the request | safe |
-| `PublishConfirmTimeoutError` | no broker confirm in time | ambiguous |
+| `PublishConfirmTimeoutError` | no broker confirm in time (or no confirm slot free on the channel, in which case it was not sent) | ambiguous |
 | `ChannelClosedError` | the channel closed before the confirm | ambiguous |
 | `DisconnectedError` | the connection dropped while the call was pending | ambiguous |
 | `NotReadyError` | the connection did not come back within `CONNECTION_READY_TIMEOUT_MS` | safe |

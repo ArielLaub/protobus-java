@@ -245,8 +245,11 @@ public abstract class BaseListener {
         }
         long delay = Math.min(100L << Math.min(failures, 9), 30000);
         Logger.warn(listenerName() + ": " + reason + "; rebuilding it in " + delay + "ms");
-        connection.scheduler().schedule(() -> connection.internalExecutor().execute(this::rebuild), delay,
-                TimeUnit.MILLISECONDS);
+        try {
+            connection.scheduler().schedule(() -> connection.runInternal(this::rebuild), delay, TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            Logger.debug(listenerName() + ": connection shut down; not rebuilding");
+        }
     }
 
     private void rebuild() {

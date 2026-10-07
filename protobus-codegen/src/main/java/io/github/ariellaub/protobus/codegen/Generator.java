@@ -29,6 +29,39 @@ final class Generator {
         return out;
     }
 
+    /**
+     * The Java names of a service's methods, allocated together so none collide:
+     * an rpc's own name (escaped when it is a keyword or a base-class member) and,
+     * for a unary rpc, its {@code Async} variant. A name already taken, by
+     * another rpc or another variant, gets underscores until it is free, so
+     * {@code fetch} and {@code fetchAsync} side by side give {@code fetchAsync_}
+     * for the first one's async variant.
+     */
+    record MethodNames(java.util.Map<String, String> plain, java.util.Map<String, String> async) {
+        static MethodNames allocate(ServiceDescriptor s) {
+            java.util.Set<String> taken = new java.util.HashSet<>(Names.RESERVED_MEMBERS);
+            java.util.Map<String, String> plain = new java.util.LinkedHashMap<>();
+            java.util.Map<String, String> async = new java.util.LinkedHashMap<>();
+            // The rpcs' own names first: they are what callers look for.
+            for (MethodDescriptor m : s.getMethods()) {
+                if (m.isClientStreaming()) continue;
+                plain.put(m.getName(), claim(taken, Names.methodIdentifier(m.getName())));
+            }
+            for (MethodDescriptor m : s.getMethods()) {
+                if (m.isClientStreaming() || m.isServerStreaming()) continue;
+                async.put(m.getName(), claim(taken, plain.get(m.getName()) + "Async"));
+            }
+            return new MethodNames(plain, async);
+        }
+
+        private static String claim(java.util.Set<String> taken, String name) {
+            String n = name;
+            while (taken.contains(n) || Names.JAVA_KEYWORDS.contains(n)) n += "_";
+            taken.add(n);
+            return n;
+        }
+    }
+
     private static String service(FileDescriptor file, ServiceDescriptor s, String pkg, String cls) {
         StringBuilder b = new StringBuilder();
         String holder = Names.descriptorHolder(file);
@@ -46,9 +79,10 @@ final class Generator {
         b.append("    public static com.google.protobuf.Descriptors.FileDescriptor getDescriptor() {\n");
         b.append("        return ").append(holder).append(".getDescriptor();\n");
         b.append("    }\n\n");
-        base(b, s);
+        MethodNames names = MethodNames.allocate(s);
+        base(b, s, names);
         b.append("\n");
-        proxy(b, s);
+        proxy(b, s, names);
         b.append("}\n");
         return b.toString();
     }
@@ -59,7 +93,7 @@ final class Generator {
                 + m.getOutputType().getFullName() + ")";
     }
 
-    private static void base(StringBuilder b, ServiceDescriptor s) {
+    private static void base(StringBuilder b, ServiceDescriptor s, MethodNames names) {
         b.append("    /**\n");
         b.append("     * Implements {@code ").append(s.getFullName()).append("}: override its rpcs. An rpc left\n");
         b.append("     * unimplemented answers PROTOCOL_ERROR. Throw a {@link ").append(RT)
@@ -75,7 +109,7 @@ final class Generator {
         for (MethodDescriptor m : s.getMethods()) {
             if (m.isClientStreaming()) continue;
             String req = Names.messageClass(m.getInputType());
-            String id = Names.methodIdentifier(m.getName());
+            String id = names.plain().get(m.getName());
             b.append("            register").append(m.isServerStreaming() ? "Stream" : "Unary").append("(\"")
                     .append(m.getName()).append("\", ").append(req).append(".getDefaultInstance(), this::")
                     .append(id).append(");\n");
@@ -92,7 +126,7 @@ final class Generator {
             }
             String req = Names.messageClass(m.getInputType());
             String res = Names.messageClass(m.getOutputType());
-            String id = Names.methodIdentifier(m.getName());
+            String id = names.plain().get(m.getName());
             if (m.isServerStreaming()) {
                 b.append("        public void ").append(id).append("(").append(req).append(" request, ").append(RT)
                         .append("StreamWriter<").append(res).append("> out, ").append(RT)
@@ -107,7 +141,7 @@ final class Generator {
         b.append("    }\n");
     }
 
-    private static void proxy(StringBuilder b, ServiceDescriptor s) {
+    private static void proxy(StringBuilder b, ServiceDescriptor s, MethodNames names) {
         b.append("    /**\n");
         b.append("     * Calls {@code ").append(s.getFullName()).append("}. Construct it with an instance name to\n");
         b.append("     * address a service registered under one; {@link #init()} before calling.\n     */\n");
@@ -121,7 +155,7 @@ final class Generator {
             if (m.isClientStreaming()) continue;
             String req = Names.messageClass(m.getInputType());
             String res = Names.messageClass(m.getOutputType());
-            String id = Names.methodIdentifier(m.getName());
+            String id = names.plain().get(m.getName());
             String name = m.getName();
             b.append("\n        /** {@code ").append(signature(m)).append("} */\n");
             if (m.isServerStreaming()) {
@@ -137,17 +171,18 @@ final class Generator {
             } else {
                 b.append("        public ").append(res).append(" ").append(id).append("(").append(req)
                         .append(" request) {\n");
-                b.append("            return await(").append(id).append("Async(request, ").append(RT)
+                String async = names.async().get(name);
+                b.append("            return await(").append(async).append("(request, ").append(RT)
                         .append("CallOptions.DEFAULT));\n        }\n\n");
                 b.append("        public ").append(res).append(" ").append(id).append("(").append(req)
                         .append(" request, ").append(RT).append("CallOptions options) {\n");
-                b.append("            return await(").append(id).append("Async(request, options));\n        }\n\n");
-                b.append("        public java.util.concurrent.CompletableFuture<").append(res).append("> ").append(id)
-                        .append("Async(").append(req).append(" request) {\n");
-                b.append("            return ").append(id).append("Async(request, ").append(RT)
+                b.append("            return await(").append(async).append("(request, options));\n        }\n\n");
+                b.append("        public java.util.concurrent.CompletableFuture<").append(res).append("> ").append(async)
+                        .append("(").append(req).append(" request) {\n");
+                b.append("            return ").append(async).append("(request, ").append(RT)
                         .append("CallOptions.DEFAULT);\n        }\n\n");
-                b.append("        public java.util.concurrent.CompletableFuture<").append(res).append("> ").append(id)
-                        .append("Async(").append(req).append(" request, ").append(RT).append("CallOptions options) {\n");
+                b.append("        public java.util.concurrent.CompletableFuture<").append(res).append("> ").append(async)
+                        .append("(").append(req).append(" request, ").append(RT).append("CallOptions options) {\n");
                 b.append("            return callTypedAsync(\"").append(name).append("\", request, options,\n");
                 b.append("                    parserDecoder(SERVICE_NAME + \".").append(name).append("\", ").append(res)
                         .append(".parser()),\n");

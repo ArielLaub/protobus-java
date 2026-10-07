@@ -417,8 +417,8 @@ public final class Connection {
 
     private void releaseWaiters(List<CompletableFuture<Void>> waiters, Throwable error) {
         for (CompletableFuture<Void> w : waiters) {
-            if (error == null) internal.execute(() -> w.complete(null));
-            else internal.execute(() -> w.completeExceptionally(error));
+            if (error == null) runInternal(() -> w.complete(null));
+            else runInternal(() -> w.completeExceptionally(error));
         }
     }
 
@@ -593,7 +593,7 @@ public final class Connection {
                         reconnection.initialDelayMs * Math.pow(reconnection.backoffMultiplier, attempt - 1),
                         reconnection.maxDelayMs);
                 delay = (long) Math.floor(base + Math.random() * 0.3 * base);
-                reconnectTimer = timer.schedule(() -> internal.execute(this::reconnectAttempt), delay,
+                reconnectTimer = timer.schedule(() -> runInternal(this::reconnectAttempt), delay,
                         TimeUnit.MILLISECONDS);
             }
         }
@@ -968,13 +968,13 @@ public final class Connection {
                 // Holding it unacknowledged would keep its prefetch slot for the life
                 // of the channel: hand it back, after a pause.
                 Logger.error("handler executor refused a delivery on " + queue + "; requeueing it in 1 s");
-                timer.schedule(() -> internal.execute(() -> {
+                later(() -> {
                     try {
                         channel.reject(delivery.deliveryTag(), true);
                     } catch (RuntimeException err) {
                         Logger.debug("requeue failed: " + err.getMessage());
                     }
-                }), 1000, TimeUnit.MILLISECONDS);
+                }, 1000, TimeUnit.MILLISECONDS);
             }
         }, () -> {
             Logger.warn("consumer for " + queue + " was cancelled by the broker");
@@ -1053,7 +1053,7 @@ public final class Connection {
             d.entry.controller.abort();
             TimeoutError timeout = new TimeoutError(
                     "message " + d.correlationId + " exceeded the " + limit + "ms processing timeout");
-            internal.execute(() -> settleError(d, timeout));
+            runInternal(() -> settleError(d, timeout));
         }, limit, TimeUnit.MILLISECONDS);
 
         BasicProperties p = d.delivery.properties();
@@ -1134,14 +1134,14 @@ public final class Connection {
             Logger.error("failed to settle message on " + d.queue + ": " + Errors.messageOf(t)
                     + (d.settlesLate() ? ". Requeueing it in 1 s." : ""));
             if (d.settlesLate()) {
-                timer.schedule(() -> internal.execute(() -> {
+                later(() -> {
                     try {
                         d.channel.reject(d.delivery.deliveryTag(), true);
                     } catch (RuntimeException e) {
                         Logger.debug("requeue failed (the channel is likely gone, which requeues it anyway): "
                                 + e.getMessage());
                     }
-                }), 1000, TimeUnit.MILLISECONDS);
+                }, 1000, TimeUnit.MILLISECONDS);
             }
         } finally {
             finishDelivery(d);
@@ -1334,7 +1334,7 @@ public final class Connection {
                 parked = new ArrayList<>(created.waiters);
                 created.waiters.clear();
             }
-            for (Runnable wake : parked) internal.execute(wake);
+            for (Runnable wake : parked) runInternal(wake);
         });
         return created;
     }
@@ -1373,30 +1373,65 @@ public final class Connection {
         PublishState state = publishStateFor(channel);
         Runnable send = () -> send(channel, state, exchange, routingKey, content, props, options.mandatory(),
                 messageId, describe, result);
+        // The caller's deadline runs from here, so time spent waiting for a slot
+        // counts against it too.
+        long confirmTimeout = Config.publishConfirmTimeoutMs();
+        Runnable[] parked = new Runnable[1];
+        ScheduledFuture<?> deadline;
+        try {
+            deadline = timer.schedule(() -> {
+                boolean neverSent;
+                synchronized (state.lock) {
+                    neverSent = parked[0] != null && state.waiters.remove(parked[0]);
+                }
+                result.completeExceptionally(new PublishConfirmTimeoutError(neverSent
+                        ? describe + " waited " + confirmTimeout + "ms for one of the channel's "
+                                + Config.maxOutstandingConfirms() + " confirm slots and was not sent"
+                        : "no broker confirm for " + describe + " within " + confirmTimeout + "ms", messageId));
+            }, confirmTimeout, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            result.completeExceptionally(new NotConnectedError("the connection has been shut down"));
+            return result;
+        }
+        result.whenComplete((v, e) -> deadline.cancel(false));
         boolean now;
         synchronized (state.lock) {
             now = state.inFlight < Config.maxOutstandingConfirms();
-            if (now) state.inFlight++;
-            else state.waiters.add(() -> {
-                synchronized (state.lock) {
-                    state.inFlight++;
-                }
-                send.run();
-            });
+            if (now) {
+                state.inFlight++;
+            } else {
+                parked[0] = () -> {
+                    if (result.isDone()) {
+                        // Timed out while parked: hand the slot straight on.
+                        releaseSlot(state);
+                        return;
+                    }
+                    send.run();
+                };
+                state.waiters.add(parked[0]);
+            }
         }
         if (now) send.run();
         return result;
     }
 
+    /** A slot came free: give it to the next parked publish, which then owns it. */
     private void releaseSlot(PublishState state) {
         Runnable next;
         synchronized (state.lock) {
-            state.inFlight--;
             next = state.waiters.poll();
+            if (next == null) state.inFlight--;
         }
-        if (next != null) internal.execute(next);
+        if (next != null) runInternal(next);
     }
 
+    /**
+     * Send one publish holding a slot. The slot, and the messageId's place among
+     * the channel's unconfirmed publishes, are held until the broker answers or the
+     * channel closes, not until the caller stops waiting: a publish whose confirm
+     * timed out may still be stored, and the bound is on what the broker has not
+     * answered.
+     */
     private void send(AmqpChannel channel, PublishState state, String exchange, String routingKey, byte[] content,
                       BasicProperties props, boolean mandatory, String messageId, String describe,
                       CompletableFuture<String> result) {
@@ -1414,44 +1449,60 @@ public final class Connection {
             state.awaiting.merge(messageId, 1, Integer::sum);
         }
         BasicProperties finalProps = b.build();
-        ScheduledFuture<?>[] deadline = new ScheduledFuture<?>[1];
-        Consumer<Throwable> finish = error -> {
+        Consumer<Throwable> settle = error -> {
             if (!settled.compareAndSet(false, true)) return;
-            if (deadline[0] != null) deadline[0].cancel(false);
             synchronized (state.lock) {
                 state.awaiting.computeIfPresent(messageId, (k, n) -> n <= 1 ? null : n - 1);
             }
             releaseSlot(state);
+            // A caller whose deadline already passed keeps that answer.
             if (error == null) result.complete(messageId);
             else result.completeExceptionally(error);
         };
-        long confirmTimeout = Config.publishConfirmTimeoutMs();
-        deadline[0] = timer.schedule(() -> finish.accept(new PublishConfirmTimeoutError(
-                "no broker confirm for " + describe + " within " + confirmTimeout + "ms", messageId)),
-                confirmTimeout, TimeUnit.MILLISECONDS);
         try {
             channel.publish(exchange, routingKey, content, finalProps, mandatory, (outcome, detail) -> {
                 switch (outcome) {
                     case ACK:
-                        finish.accept(null);
+                        settle.accept(null);
                         break;
                     case NACK:
-                        finish.accept(new PublishNackedError("broker nacked " + describe
+                        settle.accept(new PublishNackedError("broker nacked " + describe
                                 + (detail == null || detail.isEmpty() ? "" : ": " + detail), messageId));
                         break;
                     case RETURNED:
-                        finish.accept(new UnroutableError(describe + " was confirmed but returned as unroutable",
+                        settle.accept(new UnroutableError(describe + " was confirmed but returned as unroutable",
                                 messageId));
                         break;
                     default:
-                        finish.accept(new ChannelClosedError(describe + " was unconfirmed when the channel closed"
+                        settle.accept(new ChannelClosedError(describe + " was unconfirmed when the channel closed"
                                 + (detail == null || detail.isEmpty() ? "" : " (" + detail + ")"), messageId));
                 }
             });
         } catch (AmqpException e) {
-            finish.accept(new ChannelClosedError(describe + " could not be written: " + e.getMessage(), messageId));
+            settle.accept(new ChannelClosedError(describe + " could not be written: " + e.getMessage(), messageId));
         } catch (RuntimeException e) {
-            finish.accept(e);
+            settle.accept(e);
+        }
+    }
+
+    /**
+     * Run on the internal executor, or right here once it has been shut down: a
+     * late callback after Context.close() must still complete what it completes.
+     */
+    /** Run {@code task} on the internal executor in a second; dropped once the connection is shut down. */
+    private void later(Runnable task, long ms, TimeUnit unit) {
+        try {
+            timer.schedule(() -> runInternal(task), ms, unit);
+        } catch (RejectedExecutionException e) {
+            Logger.debug("connection shut down; a delayed requeue is dropped (the broker requeues on close)");
+        }
+    }
+
+    void runInternal(Runnable task) {
+        try {
+            internal.execute(task);
+        } catch (RejectedExecutionException e) {
+            task.run();
         }
     }
 

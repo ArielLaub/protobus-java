@@ -186,8 +186,11 @@ public final class Config {
     }
 
     /**
-     * Publishes awaiting a broker confirm on one channel at a time; further ones
-     * wait for a slot. {@code MAX_OUTSTANDING_CONFIRMS}, default 256.
+     * Publishes the broker has not yet answered, on one channel at a time; further
+     * ones wait for a slot. A publish whose confirm timed out keeps its slot until
+     * the broker does answer (or the channel closes): it may still be stored. A
+     * publish still waiting for a slot when its confirm deadline passes is failed
+     * without being sent. {@code MAX_OUTSTANDING_CONFIRMS}, default 256.
      */
     public static long maxOutstandingConfirms() {
         return envInt("MAX_OUTSTANDING_CONFIRMS", 256);

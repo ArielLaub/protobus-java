@@ -22,7 +22,7 @@ for tests and for applications that cannot set their environment.
 | `STREAM_MAX_TOTAL_BUFFERED_BYTES` | 268435456 | unconsumed bytes across a context's streams |
 | `DEFAULT_PREFETCH` | 1 | prefetch for late-ack consumers that set none (event listeners) |
 | `PUBLISH_CONFIRM_TIMEOUT_MS` | 30000 | how long a publish waits for its confirm, ms |
-| `MAX_OUTSTANDING_CONFIRMS` | 256 | unconfirmed publishes per channel; more wait for a slot |
+| `MAX_OUTSTANDING_CONFIRMS` | 256 | publishes the broker has not answered, per channel (a timed-out one included); more wait for a slot |
 | `CONNECTION_READY_TIMEOUT_MS` | 30000 | how long a publish waits through a reconnection, ms |
 | `AMQP_HEARTBEAT_SECONDS` | 30 | heartbeat, unless the URL sets `heartbeat` |
 | `SHUTDOWN_DRAIN_TIMEOUT_MS` | 30000 | how long shutdown waits for in-flight work, ms |

@@ -73,6 +73,10 @@ generation was superseded meanwhile, discards itself.
 Every channel is a confirm channel. A publish records its sequence number and
 waits for the broker's ack or nack; a mandatory publish that comes back as a
 basic.return is reported `UnroutableError` when its ack arrives. At most
-`MAX_OUTSTANDING_CONFIRMS` publishes await a confirm per channel. Two pending
+`MAX_OUTSTANDING_CONFIRMS` publishes await the broker's answer per channel. A
+publish whose confirm timed out keeps its slot until the broker answers or the
+channel closes, so a stalled broker cannot be handed an unbounded backlog; a
+publish still waiting for a slot when its deadline passes fails without being
+sent. Two pending
 mandatory publishes that share a messageId carry an `x-protobus-publish-tag`
 header, so their returns cannot be confused.

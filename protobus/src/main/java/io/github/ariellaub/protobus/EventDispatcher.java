@@ -92,7 +92,7 @@ public class EventDispatcher {
                         Connection.PublishOptions.of(props)))
                 // Off the transport's thread: a caller's continuation must never run
                 // on the connection's I/O thread.
-                .whenComplete((mid, err) -> connection.internalExecutor().execute(() -> {
+                .whenComplete((mid, err) -> connection.runInternal(() -> {
                     if (err == null) done.complete(null);
                     else done.completeExceptionally(err instanceof java.util.concurrent.CompletionException
                             && err.getCause() != null ? err.getCause() : err);

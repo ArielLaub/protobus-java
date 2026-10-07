@@ -145,11 +145,9 @@ public class MessageDispatcher {
             return Connection.HandlerResult.none();
         }
         Pending pending = callbacks.remove(id);
-        if (pending != null) {
-            ScheduledFuture<?> t = pending.timer;
-            if (t != null) t.cancel(false);
-            completeOff(pending.reply, content, null);
-        }
+        // The deadline stays armed: it belongs to the caller's result, which may
+        // still be waiting for the request's confirm.
+        if (pending != null) completeOff(pending.reply, content, null);
         return Connection.HandlerResult.none();
     }
 
@@ -242,14 +240,19 @@ public class MessageDispatcher {
         // still in flight.
         Pending pending = new Pending();
         callbacks.put(id, pending);
-        pending.timer = connection.scheduler().schedule(() -> {
-            if (callbacks.remove(id, pending)) {
-                completeOff(pending.reply, null, new RpcTimeoutError(
-                        "no reply for " + routingKey + " (correlationId " + id + ") within " + limit + "ms"));
-            }
-        }, limit, TimeUnit.MILLISECONDS);
-
         CompletableFuture<byte[]> result = new CompletableFuture<>();
+        // The deadline is the caller's: it ends the call whatever is still
+        // outstanding, the reply or the request's own confirm.
+        pending.timer = connection.scheduler().schedule(() -> {
+            callbacks.remove(id, pending);
+            completeOff(result, null, new RpcTimeoutError(
+                    "no reply for " + routingKey + " (correlationId " + id + ") within " + limit + "ms"));
+        }, limit, TimeUnit.MILLISECONDS);
+        result.whenComplete((r, e) -> {
+            pending.timer.cancel(false);
+            callbacks.remove(id, pending);
+        });
+
         java.util.concurrent.atomic.AtomicBoolean confirmed = new java.util.concurrent.atomic.AtomicBoolean();
         // The deadline bounds the confirm as well as the reply: a timeout or a
         // disconnect settles the call at once, without waiting for the confirm.
@@ -263,7 +266,6 @@ public class MessageDispatcher {
             if (err != null) {
                 // The request never made it, so no reply is coming: release the
                 // slot now and surface the publish failure.
-                if (callbacks.remove(id, pending)) pending.timer.cancel(false);
                 completeOff(result, null, err);
                 return;
             }
@@ -399,11 +401,23 @@ public class MessageDispatcher {
         }
 
         void fail(Throwable err) {
+            boolean completed;
             synchronized (this) {
-                if (error == null) error = err;
-                ended = true;
+                // A stream whose final chunk arrived has succeeded: what it buffered
+                // is the caller's, whatever happens to the connection afterwards.
+                completed = ended && error == null && !cancelled;
+                if (!completed) {
+                    if (error == null) error = err;
+                    ended = true;
+                }
                 if (idle != null) idle.cancel(false);
                 notifyAll();
+            }
+            if (completed) {
+                // No more replies are coming for it; only the registration goes.
+                releaseSignal.run();
+                pendingStreams.remove(id, this);
+                return;
             }
             // Released now, keeping the error for the caller: one that never reads
             // the stream again must not hold its entry or its signal listener.
@@ -524,27 +538,34 @@ public class MessageDispatcher {
             }
         }
 
-        /** The next chunk, or null at the end. Blocks; throws the stream's failure. */
+        /**
+         * The next chunk, or null at the end. Blocks; throws the stream's failure.
+         * A failure to publish the request is one of those outcomes, so a reader
+         * waits on all of them at once: an idle timeout or a cancel wakes it while
+         * the request's confirm is still outstanding.
+         */
         byte[] next() {
-            CompletableFuture<Void> p = published;
-            if (p != null) p.join();
+            Throwable failure = null;
+            byte[] chunk = null;
+            boolean done = false;
             synchronized (this) {
                 while (true) {
                     if (error != null) {
-                        Throwable e = error;
-                        releaseLater();
-                        throw rethrow(e);
+                        failure = error;
+                        done = true;
+                        break;
                     }
-                    byte[] chunk = chunks.poll();
+                    chunk = chunks.poll();
                     if (chunk != null) {
                         bufferedBytes -= chunk.length;
-                        totalBufferedBytes.updateAndGet(t -> Math.max(0, t - chunk.length));
+                        long n = chunk.length;
+                        totalBufferedBytes.updateAndGet(t -> Math.max(0, t - n));
                         if (!ended) armIdle();
-                        return chunk;
+                        break;
                     }
                     if (ended) {
-                        releaseLater();
-                        return null;
+                        done = true;
+                        break;
                     }
                     try {
                         wait();
@@ -554,12 +575,11 @@ public class MessageDispatcher {
                     }
                 }
             }
-        }
-
-        private void releaseLater() {
-            // Called holding this monitor; release() takes it again, which is fine
-            // (reentrant), but the signal removal is better outside.
-            connection.internalExecutor().execute(this::release);
+            // On the reader's own thread, outside the monitor: no executor is
+            // involved, so a context already closed cannot get in the way.
+            if (done) release();
+            if (failure != null) throw rethrow(failure);
+            return chunk;
         }
 
         synchronized boolean finished() {
@@ -602,6 +622,13 @@ public class MessageDispatcher {
 
         public boolean finished() {
             return call.finished();
+        }
+
+        /** Whether the stream's final chunk (or its failure) has arrived, read or not. */
+        boolean ended() {
+            synchronized (call) {
+                return call.ended;
+            }
         }
 
         @Override
