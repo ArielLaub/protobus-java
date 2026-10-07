@@ -166,7 +166,10 @@ final class Staging {
         return "// A protobus custom type, declared at the root like bigint and timestamp.\n"
                 + "syntax = \"proto3\";\n\n"
                 + "option java_package = \"" + javaPackage + "\";\n"
-                + "option java_multiple_files = true;\n\n"
+                + "option java_multiple_files = true;\n"
+                // protoc would name the outer class Uuid beside the message class
+                // uuid: one file on a case-insensitive file system.
+                + "option java_outer_classname = \"ProtobusCustom" + Names.camel(t.name()) + "\";\n\n"
                 + "message " + t.name() + " {\n  optional " + t.wire() + " value = 1;\n}\n";
     }
 

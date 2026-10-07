@@ -48,6 +48,10 @@ class MainTest {
         assertTrue(svc.contains("registerUnary(\"init\", shop.orders.Order.getDefaultInstance(), this::init_);"));
         assertTrue(Files.exists(out.resolve("shop/orders/Order.java")), "java_multiple_files was added");
         assertTrue(Files.exists(out.resolve("protobus/custom/uuid.java")), "the custom type was generated");
+        // The outer class must not be Uuid beside the message class uuid: a
+        // case-insensitive file system (macOS, Windows) holds them as one file.
+        assertTrue(Files.exists(out.resolve("protobus/custom/ProtobusCustomUuid.java")));
+        assertTrue(Files.readString(out.resolve("protobus/custom/uuid.java")).contains("public final class uuid"));
         assertTrue(!Files.exists(out.resolve("io/github/ariellaub/protobus/types/bigint.java")),
                 "the built-in types ship with the runtime");
         assertTrue(Files.size(set) > 0);

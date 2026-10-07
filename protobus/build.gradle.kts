@@ -15,11 +15,6 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
-java {
-    withSourcesJar()
-    withJavadocJar()
-}
-
 protobuf {
     // Only protobus/types.proto (bigint, timestamp) is compiled here. The
     // envelopes are encoded by hand, byte for byte as TypeScript writes them.
