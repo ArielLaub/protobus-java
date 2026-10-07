@@ -1,0 +1,16 @@
+# Build trees
+build/
+.gradle/
+/out/
+.kotlin/
+
+# Editors and tools
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+
+# Local secrets and environment
+.env
+.env.*
