@@ -75,4 +75,19 @@ class StagingTest {
                 + "message M { bigint a = 1; }\noption java_multiple_files = true;\n";
         assertEquals(schema, Staging.stage(schema, List.of()));
     }
+
+    @Test
+    void aCapitalisedPackageBecomesALowercaseJavaPackage() {
+        // package Chat in chat.proto: protoc's outer class Chat.Chat would shadow
+        // the package in every qualified reference, and its own code would not
+        // compile.
+        String staged = Staging.stage("syntax = \"proto3\";\npackage Chat;\nmessage Token {}\n", List.of());
+        assertTrue(staged.contains("option java_package = \"chat\";"), staged);
+        assertTrue(Staging.stage("syntax = \"proto3\";\npackage Deep.Pkg;\n", List.of())
+                .contains("option java_package = \"deep.pkg\";"));
+        // Already lowercase, or chosen by the schema: left alone.
+        assertFalse(Staging.stage("syntax = \"proto3\";\npackage interop;\n", List.of()).contains("java_package"));
+        String own = "syntax = \"proto3\";\npackage Chat;\noption java_package = \"com.acme.chat\";\n";
+        assertFalse(Staging.stage(own, List.of()).contains("option java_package = \"chat\""));
+    }
 }

@@ -20,8 +20,10 @@ import java.util.regex.Pattern;
  * importing them. Each staged copy gains, at its end (so line numbers in protoc's
  * errors still match the original), {@code import "protobus/types.proto";} when it
  * uses {@code bigint} or {@code timestamp} without declaring them, the import of
- * each declared custom type it uses, and {@code option java_multiple_files = true;}
- * unless it sets that option itself. The original files are never touched.
+ * each declared custom type it uses, {@code option java_multiple_files = true;}
+ * unless it sets that option itself, and, for a capitalised package with no
+ * {@code java_package}, that package lowercased as its Java package. The original
+ * files are never touched.
  */
 final class Staging {
     private Staging() {}
@@ -122,6 +124,11 @@ final class Staging {
         return Pattern.compile("\\boption\\s+" + Pattern.quote(option) + "\\s*=").matcher(code).find();
     }
 
+    static String protoPackage(String code) {
+        Matcher m = Pattern.compile("\\bpackage\\s+([A-Za-z_][\\w.]*)\\s*;").matcher(code);
+        return m.find() ? m.group(1) : null;
+    }
+
     static boolean imports(String code, String file) {
         Matcher m = Pattern.compile("\\bimport\\s+(?:public\\s+|weak\\s+)?\"([^\"]*)\"").matcher(code);
         while (m.find()) if (m.group(1).equals(file)) return true;
@@ -142,6 +149,14 @@ final class Staging {
             }
         }
         if (!hasOption(code, "java_multiple_files")) extra.append("option java_multiple_files = true;\n");
+        // A capitalised proto package (package Calculator, in Calculator.proto) is
+        // common in shared schemas, and as a Java package it breaks: protoc's outer
+        // class Calculator.Calculator shadows the package in every qualified
+        // reference, its own code included. Java packages are lowercase anyway.
+        String pkg = protoPackage(code);
+        if (pkg != null && !pkg.equals(pkg.toLowerCase(java.util.Locale.ROOT)) && !hasOption(code, "java_package")) {
+            extra.append("option java_package = \"").append(pkg.toLowerCase(java.util.Locale.ROOT)).append("\";\n");
+        }
         if (extra.length() == 0) return proto;
         String sep = proto.endsWith("\n") ? "" : "\n";
         return proto + sep + "// Added by protobus-codegen to its staged copy.\n" + extra;
