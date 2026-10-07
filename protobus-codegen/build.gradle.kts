@@ -38,3 +38,14 @@ val fatJar by tasks.registering(Jar::class) {
     from({ configurations.runtimeClasspath.get().filter { it.name.endsWith("jar") }.map { zipTree(it) } })
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
+val protocForTests by configurations.creating
+dependencies {
+    protocForTests("com.google.protobuf:protoc:${libs.versions.protobuf.get()}:${protocClassifier()}@exe")
+}
+tasks.test {
+    doFirst {
+        val exe = protocForTests.singleFile
+        exe.setExecutable(true)
+        systemProperty("protoc", exe.absolutePath)
+    }
+}

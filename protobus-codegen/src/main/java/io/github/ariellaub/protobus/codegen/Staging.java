@@ -55,6 +55,15 @@ final class Staging {
 
     /** Text with comments and string literals blanked, so names inside them do not count. */
     static String code(String proto) {
+        return strip(proto, true);
+    }
+
+    /** Text with comments blanked, string literals kept: for reading import paths. */
+    static String withoutComments(String proto) {
+        return strip(proto, false);
+    }
+
+    private static String strip(String proto, boolean blankStrings) {
         StringBuilder out = new StringBuilder(proto.length());
         int i = 0;
         int n = proto.length();
@@ -73,17 +82,18 @@ final class Staging {
                     i++;
                 }
             } else if (c == '"' || c == '\'') {
+                // A literal is copied (or blanked) whole, so a "//" inside one is
+                // never read as a comment.
                 out.append(c);
                 i++;
                 while (i < n && proto.charAt(i) != c) {
-                    if (proto.charAt(i) == '\\') {
-                        out.append(' ');
-                        i++;
+                    if (proto.charAt(i) == '\\' && i + 1 < n) {
+                        out.append(blankStrings ? "  " : proto.substring(i, i + 2));
+                        i += 2;
+                        continue;
                     }
-                    if (i < n) {
-                        out.append(' ');
-                        i++;
-                    }
+                    out.append(blankStrings ? ' ' : proto.charAt(i));
+                    i++;
                 }
                 if (i < n) {
                     out.append(c);
@@ -121,12 +131,13 @@ final class Staging {
     /** The staged text of one schema. */
     static String stage(String proto, List<CustomType> custom) {
         String code = code(proto);
+        String importable = withoutComments(proto);
         StringBuilder extra = new StringBuilder();
         boolean builtin = false;
         for (String t : BUILTIN) builtin |= uses(code, t) && !declares(code, t);
-        if (builtin && !imports(code, TYPES)) extra.append("import \"").append(TYPES).append("\";\n");
+        if (builtin && !imports(importable, TYPES)) extra.append("import \"").append(TYPES).append("\";\n");
         for (CustomType t : custom) {
-            if (uses(code, t.name()) && !declares(code, t.name()) && !imports(code, t.file())) {
+            if (uses(code, t.name()) && !declares(code, t.name()) && !imports(importable, t.file())) {
                 extra.append("import \"").append(t.file()).append("\";\n");
             }
         }
