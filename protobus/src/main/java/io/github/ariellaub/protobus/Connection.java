@@ -978,12 +978,15 @@ public final class Connection {
     /** A delivery the handler executor will not run: settle it so it is not held. */
     private void refuseDelivery(InFlight d, AmqpChannel channel, Delivery delivery, String queue) {
         deliveryFinished();
-        if (!d.settlesLate()) {
-            Logger.error("handler executor refused an acknowledged delivery on " + queue + "; it is lost");
+        if (d.options.noAck) {
+            // Acknowledged by the broker on delivery: there is nothing to hand back.
+            Logger.error("handler executor refused an auto-acked delivery on " + queue + "; it is lost");
             return;
         }
-        // Holding it unacknowledged would keep its prefetch slot for the life
-        // of the channel: hand it back, after a pause.
+        // Unacknowledged, late-ack or early-ack alike: an early-ack consumer acks
+        // inside the handler task, which never ran. Holding it would keep it
+        // from every other consumer for the life of the channel: hand it back,
+        // after a pause.
         Logger.error("handler executor refused a delivery on " + queue + "; requeueing it in 1 s");
         later(() -> {
             try {
@@ -1371,7 +1374,7 @@ public final class Connection {
     private static final class PublishState {
         final Object lock = new Object();
         /** Writes waiting for the channel, in publish order; one drains them at a time. */
-        final ArrayDeque<Runnable> writes = new ArrayDeque<>();
+        final ArrayDeque<Runnable[]> writes = new ArrayDeque<>();
         boolean writing;
         final Map<String, Integer> awaiting = new HashMap<>();
         int inFlight;
@@ -1392,10 +1395,16 @@ public final class Connection {
         // hold them forever: wake them, and they fail on the closed channel.
         channel.onClose(reason -> {
             List<Runnable> parked;
+            List<Runnable[]> unwritten;
             synchronized (created.lock) {
                 parked = new ArrayList<>(created.waiters);
                 created.waiters.clear();
+                // Writes still queued fail here, whatever the writer is doing: it
+                // may be blocked in a write that only the close will end.
+                unwritten = new ArrayList<>(created.writes);
+                created.writes.clear();
             }
+            for (Runnable[] w : unwritten) runInternal(w[1]);
             for (Runnable wake : parked) runInternal(wake);
         });
         return created;
@@ -1435,6 +1444,13 @@ public final class Connection {
         PublishState state = publishStateFor(channel);
         Runnable send = () -> send(channel, state, exchange, routingKey, content, props, options.mandatory(),
                 messageId, describe, result);
+        // A queued write whose channel closed first: never sent, and its slot is
+        // released exactly once, here or by the write itself, whichever dequeues it.
+        Runnable unwritten = () -> {
+            result.completeExceptionally(new ChannelClosedError(
+                    describe + " was not written: the channel closed first", messageId));
+            releaseSlot(state);
+        };
         // The caller's deadline runs from here, so time spent waiting for a slot
         // counts against it too.
         long confirmTimeout = Config.publishConfirmTimeoutMs();
@@ -1468,12 +1484,12 @@ public final class Connection {
                         releaseSlot(state);
                         return;
                     }
-                    write(state, send);
+                    write(state, send, unwritten);
                 };
                 state.waiters.add(parked[0]);
             }
         }
-        if (now) write(state, send);
+        if (now) write(state, send, unwritten);
         return result;
     }
 
@@ -1484,10 +1500,10 @@ public final class Connection {
      * and a blocked caller could not see its deadline pass. The queue is bounded
      * by the channel's confirm slots, since only a publish holding one is queued.
      */
-    private void write(PublishState state, Runnable task) {
+    private void write(PublishState state, Runnable task, Runnable unwritten) {
         boolean start;
         synchronized (state.lock) {
-            state.writes.add(task);
+            state.writes.add(new Runnable[] {task, unwritten});
             start = !state.writing;
             if (start) state.writing = true;
         }
@@ -1496,7 +1512,7 @@ public final class Connection {
 
     private void drainWrites(PublishState state) {
         while (true) {
-            Runnable next;
+            Runnable[] next;
             synchronized (state.lock) {
                 next = state.writes.poll();
                 if (next == null) {
@@ -1505,7 +1521,7 @@ public final class Connection {
                 }
             }
             try {
-                next.run();
+                next[0].run();
             } catch (RuntimeException e) {
                 Logger.error("a publish failed unexpectedly: " + e);
             }
