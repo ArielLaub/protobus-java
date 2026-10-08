@@ -5,6 +5,9 @@ and no import for the custom types.
 
 ## The Gradle plugin
 
+> Not on the Gradle Plugin Portal yet; until it is, use [the CLI](#the-cli)
+> (`io.github.ariellaub:protobus-codegen` on Maven Central).
+
 ```kotlin
 plugins {
     java

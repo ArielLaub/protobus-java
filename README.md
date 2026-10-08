@@ -46,6 +46,11 @@ The plugin generates the code for every `.proto` under `src/main/proto` at
 build time; protoc comes from Maven Central, so nothing needs installing. For
 Maven, or for protoc and buf directly, see [Code generation](docs/codegen.md).
 
+> **The Gradle plugin is not on the Gradle Plugin Portal yet.** Until it is,
+> generate the code with the `protobus-codegen` CLI, which is on Maven Central
+> (see [Code generation](docs/codegen.md#the-cli)); the runtime dependency above
+> is unaffected.
+
 The runtime depends on [protobuf-java](https://github.com/protocolbuffers/protobuf)
 (3.25 or 4.x) and the [RabbitMQ Java client](https://github.com/rabbitmq/rabbitmq-java-client),
 and logs through SLF4J when a provider is on the class path.

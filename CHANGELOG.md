@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-10-08)
 
 The first release of the Java port, numbered with the other ports' 2.x line,
 whose wire protocol it speaks.
