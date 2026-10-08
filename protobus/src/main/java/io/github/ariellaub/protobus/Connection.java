@@ -735,6 +735,9 @@ public final class Connection {
             connected = false;
         }
         releaseWaiters(waiters, new NotReadyError("the connection has been closed"));
+        // Listeners first, so pending calls and streams fail as disconnected
+        // before closing the socket can fail a queued write under them.
+        emitDisconnected();
         if (h != null) {
             try {
                 h.close();
@@ -743,7 +746,6 @@ public final class Connection {
             }
             Logger.info("connection closed (manual disconnect)");
         }
-        emitDisconnected();
     }
 
     /** Release the connection's threads. Call once, after {@link #disconnect()}. */
@@ -947,7 +949,7 @@ public final class Connection {
      */
     public String consume(AmqpChannel channel, String queue, MessageHandler handler, ConsumeOptions options,
                           boolean lateAck, ConsumeRetryOptions retry, Long processingTimeoutMs) {
-        Executor run = options.maxConcurrency > 0 ? new Limited(handlers, options.maxConcurrency) : handlers;
+        Limited limited = options.maxConcurrency > 0 ? new Limited(handlers, options.maxConcurrency, timer) : null;
         return channel.consume(queue, options.consumerTag, options.noAck, options.exclusive, delivery -> {
             // Counted for the whole settle, so a graceful shutdown waits for the
             // reply, retry or dead-letter publish and not just the handler body.
@@ -957,24 +959,15 @@ public final class Connection {
                 handleDelivery(d, handler, processingTimeoutMs);
                 return;
             }
+            Runnable refused = () -> refuseDelivery(d, channel, delivery, queue);
+            if (limited != null) {
+                limited.execute(() -> handleDelivery(d, handler, processingTimeoutMs), refused);
+                return;
+            }
             try {
-                run.execute(() -> handleDelivery(d, handler, processingTimeoutMs));
+                handlers.execute(() -> handleDelivery(d, handler, processingTimeoutMs));
             } catch (RejectedExecutionException e) {
-                deliveryFinished();
-                if (!d.settlesLate()) {
-                    Logger.error("handler executor refused an acknowledged delivery on " + queue + "; it is lost");
-                    return;
-                }
-                // Holding it unacknowledged would keep its prefetch slot for the life
-                // of the channel: hand it back, after a pause.
-                Logger.error("handler executor refused a delivery on " + queue + "; requeueing it in 1 s");
-                later(() -> {
-                    try {
-                        channel.reject(delivery.deliveryTag(), true);
-                    } catch (RuntimeException err) {
-                        Logger.debug("requeue failed: " + err.getMessage());
-                    }
-                }, 1000, TimeUnit.MILLISECONDS);
+                refused.run();
             }
         }, () -> {
             Logger.warn("consumer for " + queue + " was cancelled by the broker");
@@ -982,49 +975,115 @@ public final class Connection {
         });
     }
 
-    /** Runs at most {@code limit} tasks at once on {@code target}; the rest wait, in order. */
-    private static final class Limited implements Executor {
+    /** A delivery the handler executor will not run: settle it so it is not held. */
+    private void refuseDelivery(InFlight d, AmqpChannel channel, Delivery delivery, String queue) {
+        deliveryFinished();
+        if (!d.settlesLate()) {
+            Logger.error("handler executor refused an acknowledged delivery on " + queue + "; it is lost");
+            return;
+        }
+        // Holding it unacknowledged would keep its prefetch slot for the life
+        // of the channel: hand it back, after a pause.
+        Logger.error("handler executor refused a delivery on " + queue + "; requeueing it in 1 s");
+        later(() -> {
+            try {
+                channel.reject(delivery.deliveryTag(), true);
+            } catch (RuntimeException err) {
+                Logger.debug("requeue failed: " + err.getMessage());
+            }
+        }, 1000, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Runs at most {@code limit} tasks at once on {@code target}; the rest wait, in
+     * order. A worker the target accepted goes on to run the queued tasks itself,
+     * so the queue never depends on the target accepting a resubmission from a
+     * worker that is still occupying its slot. A task the target refuses is
+     * retried shortly, unless the target has shut down: then it is handed to its
+     * {@code refused} callback, so it is settled rather than stranded.
+     */
+    private static final class Limited {
         private final Executor target;
         private final int limit;
-        private final ArrayDeque<Runnable> waiting = new ArrayDeque<>();
+        private final ScheduledExecutorService timer;
+        private final ArrayDeque<Runnable[]> waiting = new ArrayDeque<>();
         private int active;
 
-        Limited(Executor target, int limit) {
+        Limited(Executor target, int limit, ScheduledExecutorService timer) {
             this.target = target;
             this.limit = limit;
+            this.timer = timer;
         }
 
-        @Override
-        public void execute(Runnable task) {
+        /** @param refused settles the task if it can never run */
+        void execute(Runnable task, Runnable refused) {
+            Runnable[] entry = {task, refused};
             synchronized (this) {
                 if (active >= limit) {
-                    waiting.add(task);
+                    waiting.add(entry);
                     return;
                 }
                 active++;
             }
-            launch(task);
+            launch(entry);
         }
 
-        private void launch(Runnable task) {
+        private void launch(Runnable[] first) {
             try {
-                target.execute(() -> {
-                    try {
-                        task.run();
-                    } finally {
-                        Runnable next;
-                        synchronized (this) {
-                            next = waiting.poll();
-                            if (next == null) active--;
-                        }
-                        if (next != null) launch(next);
-                    }
-                });
+                target.execute(() -> work(first));
             } catch (RejectedExecutionException e) {
+                boolean shutdown = target instanceof ExecutorService && ((ExecutorService) target).isShutdown();
+                List<Runnable[]> dropped = new ArrayList<>();
                 synchronized (this) {
                     active--;
+                    if (shutdown) {
+                        dropped.add(first);
+                        dropped.addAll(waiting);
+                        waiting.clear();
+                    } else {
+                        waiting.addFirst(first);
+                    }
                 }
-                throw e;
+                for (Runnable[] d : dropped) d[1].run();
+                if (!shutdown) retryLater();
+            }
+        }
+
+        private void retryLater() {
+            try {
+                timer.schedule(this::retry, 20, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException e) {
+                List<Runnable[]> dropped;
+                synchronized (this) {
+                    dropped = new ArrayList<>(waiting);
+                    waiting.clear();
+                }
+                for (Runnable[] d : dropped) d[1].run();
+            }
+        }
+
+        private void retry() {
+            Runnable[] next;
+            synchronized (this) {
+                if (active >= limit || waiting.isEmpty()) return;
+                next = waiting.poll();
+                active++;
+            }
+            launch(next);
+        }
+
+        private void work(Runnable[] first) {
+            Runnable[] current = first;
+            while (current != null) {
+                try {
+                    current[0].run();
+                } catch (RuntimeException e) {
+                    Logger.error("a delivery task failed unexpectedly: " + e);
+                }
+                synchronized (this) {
+                    current = waiting.poll();
+                    if (current == null) active--;
+                }
             }
         }
     }
@@ -1311,6 +1370,9 @@ public final class Connection {
     /** Per-channel publish bookkeeping. */
     private static final class PublishState {
         final Object lock = new Object();
+        /** Writes waiting for the channel, in publish order; one drains them at a time. */
+        final ArrayDeque<Runnable> writes = new ArrayDeque<>();
+        boolean writing;
         final Map<String, Integer> awaiting = new HashMap<>();
         int inFlight;
         final ArrayDeque<Runnable> waiters = new ArrayDeque<>();
@@ -1406,13 +1468,48 @@ public final class Connection {
                         releaseSlot(state);
                         return;
                     }
-                    send.run();
+                    write(state, send);
                 };
                 state.waiters.add(parked[0]);
             }
         }
-        if (now) send.run();
+        if (now) write(state, send);
         return result;
+    }
+
+    /**
+     * Hand a write to the channel's writer. Writes run on the library's own
+     * threads, one at a time per channel and in order, never on the caller's or a
+     * timer's: a socket write can block (a full TCP buffer, broker flow control),
+     * and a blocked caller could not see its deadline pass. The queue is bounded
+     * by the channel's confirm slots, since only a publish holding one is queued.
+     */
+    private void write(PublishState state, Runnable task) {
+        boolean start;
+        synchronized (state.lock) {
+            state.writes.add(task);
+            start = !state.writing;
+            if (start) state.writing = true;
+        }
+        if (start) runInternal(() -> drainWrites(state));
+    }
+
+    private void drainWrites(PublishState state) {
+        while (true) {
+            Runnable next;
+            synchronized (state.lock) {
+                next = state.writes.poll();
+                if (next == null) {
+                    state.writing = false;
+                    return;
+                }
+            }
+            try {
+                next.run();
+            } catch (RuntimeException e) {
+                Logger.error("a publish failed unexpectedly: " + e);
+            }
+        }
     }
 
     /** A slot came free: give it to the next parked publish, which then owns it. */
@@ -1435,6 +1532,11 @@ public final class Connection {
     private void send(AmqpChannel channel, PublishState state, String exchange, String routingKey, byte[] content,
                       BasicProperties props, boolean mandatory, String messageId, String describe,
                       CompletableFuture<String> result) {
+        if (result.isDone()) {
+            // Its deadline passed while it waited for the writer: never sent.
+            releaseSlot(state);
+            return;
+        }
         AtomicBoolean settled = new AtomicBoolean();
         BasicProperties.Builder b = props.builder().messageId(messageId);
         synchronized (state.lock) {

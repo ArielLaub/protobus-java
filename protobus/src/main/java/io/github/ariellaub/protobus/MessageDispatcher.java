@@ -403,9 +403,10 @@ public class MessageDispatcher {
         void fail(Throwable err) {
             boolean completed;
             synchronized (this) {
-                // A stream whose final chunk arrived has succeeded: what it buffered
-                // is the caller's, whatever happens to the connection afterwards.
-                completed = ended && error == null && !cancelled;
+                // A stream that already ended without an error (its final chunk
+                // arrived, or its caller cancelled it) keeps that outcome: a late
+                // publish failure or a disconnect cannot turn it into an error.
+                completed = ended && error == null;
                 if (!completed) {
                     if (error == null) error = err;
                     ended = true;

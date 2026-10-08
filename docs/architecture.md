@@ -27,7 +27,7 @@ RabbitMQ Java client in production, `testing.MemoryBroker` in tests.
 | the RabbitMQ client's consumer threads | deliveries, one at a time per channel; replies and cancellations are handled right there |
 | the RabbitMQ client's I/O thread | confirms, returns and closes |
 | the handler executor | service and event handlers, and their settlement |
-| `protobus-internal` | reconnection, restoration, settlement after a processing timeout, completion of callers' futures |
+| `protobus-internal` | publishes (one writer per channel, in order), reconnection, restoration, settlement after a processing timeout, completion of callers' futures |
 | `protobus-timer` | deadlines: RPC timeouts, idle timeouts, processing timeouts, confirm timeouts, reconnection backoff |
 
 A delivery to a service is handed to the handler executor at once; the handler
@@ -70,7 +70,10 @@ generation was superseded meanwhile, discards itself.
 
 ## Publishing
 
-Every channel is a confirm channel. A publish records its sequence number and
+Every channel is a confirm channel, and its publishes are written by one
+writer of its own, in order, on a library thread: a socket write can block on a
+full buffer or broker flow control, and the caller (and its deadline) never
+wait on it. A publish records its sequence number and
 waits for the broker's ack or nack; a mandatory publish that comes back as a
 basic.return is reported `UnroutableError` when its ack arrives. At most
 `MAX_OUTSTANDING_CONFIRMS` publishes await the broker's answer per channel. A

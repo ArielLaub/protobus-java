@@ -70,6 +70,8 @@ class PublishTest extends MemoryBus {
         for (int i = 0; i < 5; i++) {
             fs.add(ctx.connection().publishAsync(ch, "", "q", new byte[0], Connection.PublishOptions.of(null)));
         }
+        // Writes reach the broker on the channel's writer, a moment after the call.
+        assertTrue(eventually(() -> broker.heldConfirms() == 2));
         broker.flush();
         assertEquals(2, broker.heldConfirms());
         broker.setConfirmMode(MemoryBroker.ConfirmMode.ACK);
@@ -100,6 +102,8 @@ class PublishTest extends MemoryBus {
                 new Connection.PublishOptions(props, true));
         CompletableFuture<String> unroutable = ctx.connection().publishAsync(ch, "x.topic", "nowhere", new byte[0],
                 new Connection.PublishOptions(props, true));
+        // Writes reach the broker on the channel's writer, a moment after the call.
+        assertTrue(eventually(() -> broker.heldConfirms() == 2));
         broker.flush();
         assertEquals(2, broker.heldConfirms());
         broker.releaseHeldConfirms(ConfirmOutcome.ACK);
