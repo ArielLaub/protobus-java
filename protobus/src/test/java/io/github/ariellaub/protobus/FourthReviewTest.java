@@ -33,26 +33,39 @@ class FourthReviewTest extends MemoryBus {
         assertEquals(0, s.slowStarted.get());
     }
 
-    @Test
-    void closingFailsPublishesQueuedBehindABlockedWrite() throws Exception {
+    /**
+     * The second publish waits behind a write blocked in the transport: queued for
+     * the writer when a confirm slot is free (limit 2), or for a slot when none is
+     * (limit 1). Either way, closing the context must fail it at once.
+     */
+    @org.junit.jupiter.params.ParameterizedTest(name = "confirm limit {0}")
+    @org.junit.jupiter.params.provider.ValueSource(ints = {1, 2})
+    void closingFailsPublishesQueuedBehindABlockedWrite(int limit) throws Exception {
+        Config.set("MAX_OUTSTANDING_CONFIRMS", String.valueOf(limit));
+        Config.set("PUBLISH_CONFIRM_TIMEOUT_MS", "300");
         ThirdReviewTest.StallingTransport transport = new ThirdReviewTest.StallingTransport(broker);
         Context c = new Context(ContextOptions.DEFAULT.withTransport(transport));
         c.init("amqp://memory/");
         AmqpChannel ch = c.connection().openChannel();
         c.connection().declareQueue(ch, "q", true, false, false, Map.of());
         CountDownLatch stall = new CountDownLatch(1);
+        transport.entered = new CountDownLatch(1);
         transport.stall = stall;
         try {
             CompletableFuture<String> first = c.connection().publishAsync(ch, "", "q", new byte[0],
                     Connection.PublishOptions.of(null));
+            assertTrue(transport.entered.await(2, TimeUnit.SECONDS), "the first write never reached the transport");
             CompletableFuture<String> second = c.connection().publishAsync(ch, "", "q", new byte[0],
                     Connection.PublishOptions.of(null));
-            Thread.sleep(50); // the first is now blocked in its write, the second queued behind it
             c.close();
             ExecutionException e = org.junit.jupiter.api.Assertions.assertThrows(ExecutionException.class,
-                    () -> second.get(2, TimeUnit.SECONDS));
+                    () -> second.get(500, TimeUnit.MILLISECONDS));
             assertTrue(e.getCause() instanceof ChannelClosedError, String.valueOf(e.getCause()));
             assertTrue(!first.isDone() || first.isCompletedExceptionally());
+            // A publish made after the close fails at once too.
+            CompletableFuture<String> late = c.connection().publishAsync(ch, "", "q", new byte[0],
+                    Connection.PublishOptions.of(null));
+            assertTrue(late.isCompletedExceptionally());
         } finally {
             stall.countDown();
         }

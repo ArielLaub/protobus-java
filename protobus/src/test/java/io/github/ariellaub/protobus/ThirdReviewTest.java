@@ -48,6 +48,8 @@ class ThirdReviewTest extends MemoryBus {
     static final class StallingTransport implements Transport {
         final Transport inner;
         volatile CountDownLatch stall;
+        /** Counted down when a write reaches the stall, so a test knows it is blocked. */
+        volatile CountDownLatch entered = new CountDownLatch(1);
 
         StallingTransport(Transport inner) {
             this.inner = inner;
@@ -91,6 +93,7 @@ class ThirdReviewTest extends MemoryBus {
                                 boolean mandatory, BiConsumer<ConfirmOutcome, String> onConfirm) {
                 CountDownLatch s = stall;
                 if (s != null) {
+                    entered.countDown();
                     try {
                         s.await();
                     } catch (InterruptedException e) {

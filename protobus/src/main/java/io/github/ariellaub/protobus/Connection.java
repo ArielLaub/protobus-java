@@ -1377,8 +1377,15 @@ public final class Connection {
         final ArrayDeque<Runnable[]> writes = new ArrayDeque<>();
         boolean writing;
         final Map<String, Integer> awaiting = new HashMap<>();
+        /** Publishes holding a slot: written, or queued for the writer. */
         int inFlight;
-        final ArrayDeque<Runnable> waiters = new ArrayDeque<>();
+        /**
+         * Publishes waiting for a slot, as {resume, notSent}. A waiting publish holds
+         * no slot: resuming one hands it the slot being released.
+         */
+        final ArrayDeque<Runnable[]> waiters = new ArrayDeque<>();
+        /** The channel has closed: nothing more is queued, and nothing waits. */
+        boolean closed;
     }
 
     private final Map<AmqpChannel, PublishState> publishStates = new WeakHashMap<>();
@@ -1391,21 +1398,22 @@ public final class Connection {
             created = new PublishState();
             publishStates.put(channel, created);
         }
-        // A channel closing with publishes parked on the outstanding bound would
-        // hold them forever: wake them, and they fail on the closed channel.
+        // Everything not yet written fails here, directly, whatever the writer is
+        // doing: it may be blocked in a write that only this close will end. A
+        // publish waiting for a slot is failed, not resumed (it would only queue
+        // behind that write), and holds no slot to release.
         channel.onClose(reason -> {
-            List<Runnable> parked;
+            List<Runnable[]> parked;
             List<Runnable[]> unwritten;
             synchronized (created.lock) {
+                created.closed = true;
                 parked = new ArrayList<>(created.waiters);
                 created.waiters.clear();
-                // Writes still queued fail here, whatever the writer is doing: it
-                // may be blocked in a write that only the close will end.
                 unwritten = new ArrayList<>(created.writes);
                 created.writes.clear();
             }
             for (Runnable[] w : unwritten) runInternal(w[1]);
-            for (Runnable wake : parked) runInternal(wake);
+            for (Runnable[] p : parked) runInternal(p[1]);
         });
         return created;
     }
@@ -1454,7 +1462,7 @@ public final class Connection {
         // The caller's deadline runs from here, so time spent waiting for a slot
         // counts against it too.
         long confirmTimeout = Config.publishConfirmTimeoutMs();
-        Runnable[] parked = new Runnable[1];
+        Runnable[][] parked = new Runnable[1][];
         ScheduledFuture<?> deadline;
         try {
             deadline = timer.schedule(() -> {
@@ -1474,18 +1482,25 @@ public final class Connection {
         result.whenComplete((v, e) -> deadline.cancel(false));
         boolean now;
         synchronized (state.lock) {
+            if (state.closed) {
+                result.completeExceptionally(new ChannelClosedError(describe + ": the channel is closed", messageId));
+                return result;
+            }
             now = state.inFlight < Config.maxOutstandingConfirms();
             if (now) {
                 state.inFlight++;
             } else {
-                parked[0] = () -> {
+                Runnable resume = () -> {
                     if (result.isDone()) {
-                        // Timed out while parked: hand the slot straight on.
+                        // Timed out while waiting: hand the slot straight on.
                         releaseSlot(state);
                         return;
                     }
                     write(state, send, unwritten);
                 };
+                Runnable notSent = () -> result.completeExceptionally(new ChannelClosedError(
+                        describe + " was not sent: the channel closed while it waited for a confirm slot", messageId));
+                parked[0] = new Runnable[] {resume, notSent};
                 state.waiters.add(parked[0]);
             }
         }
@@ -1502,10 +1517,16 @@ public final class Connection {
      */
     private void write(PublishState state, Runnable task, Runnable unwritten) {
         boolean start;
+        boolean closed;
         synchronized (state.lock) {
-            state.writes.add(new Runnable[] {task, unwritten});
-            start = !state.writing;
+            closed = state.closed;
+            if (!closed) state.writes.add(new Runnable[] {task, unwritten});
+            start = !closed && !state.writing;
             if (start) state.writing = true;
+        }
+        if (closed) {
+            unwritten.run();
+            return;
         }
         if (start) runInternal(() -> drainWrites(state));
     }
@@ -1530,12 +1551,12 @@ public final class Connection {
 
     /** A slot came free: give it to the next parked publish, which then owns it. */
     private void releaseSlot(PublishState state) {
-        Runnable next;
+        Runnable[] next;
         synchronized (state.lock) {
             next = state.waiters.poll();
             if (next == null) state.inFlight--;
         }
-        if (next != null) runInternal(next);
+        if (next != null) runInternal(next[0]);
     }
 
     /**
