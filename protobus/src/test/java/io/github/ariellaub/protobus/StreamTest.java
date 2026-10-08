@@ -121,10 +121,12 @@ class StreamTest extends MemoryBus {
     @Test
     void aProducerOutrunningItsConsumerFailsTheStream() {
         Config.set("STREAM_MAX_BUFFERED_CHUNKS", "3");
-        serve();
+        CalcService s = serve();
         ProtobusStream<Tick> stream = proxy().ticks(ticks(50));
-        // Let the producer run ahead of a consumer that has not started.
-        assertTrue(eventually(() -> broker.unackedCount("pbtest.Calc") == 0));
+        // Let the producer run ahead of a consumer that has not started: past the
+        // three-chunk bound, the caller fails the stream and the producer is told
+        // to stop.
+        assertTrue(eventually(() -> s.yielded.get() >= 5 || s.stoppedEarly.get()));
         assertThrows(StreamBackpressureError.class, () -> {
             while (stream.hasNext()) stream.next();
         });
