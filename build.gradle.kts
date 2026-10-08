@@ -1,6 +1,7 @@
 plugins {
     java
     alias(libs.plugins.protobuf) apply false
+    alias(libs.plugins.mavenPublish) apply false
 }
 
 subprojects {
@@ -47,41 +48,50 @@ subprojects {
     }
 }
 
-// The artifacts users depend on: the runtime and the code generator. Signing and
-// the Maven Central upload are a release step, configured where the keys live.
+// The artifacts users depend on: the runtime and the code generator, published
+// to Maven Central (the Central Portal) and signed. Credentials and the signing
+// key come from the environment, as ORG_GRADLE_PROJECT_mavenCentralUsername,
+// ...Password, ...signingInMemoryKey and ...signingInMemoryKeyPassword; without a
+// key nothing is signed, which is what local and test publishing want.
 configure(listOf(project(":protobus"), project(":protobus-codegen"))) {
-    apply(plugin = "maven-publish")
-    extensions.configure<JavaPluginExtension> {
-        withSourcesJar()
-        withJavadocJar()
-    }
-    extensions.configure<PublishingExtension> {
-        publications {
-            create<MavenPublication>("maven") {
-                from(components["java"])
-                pom {
-                    name.set(project.name)
-                    description.set(project.description)
-                    url.set("https://github.com/ArielLaub/protobus-java")
-                    licenses {
-                        license {
-                            name.set("MIT License")
-                            url.set("https://opensource.org/licenses/MIT")
-                        }
-                    }
-                    developers {
-                        developer {
-                            id.set("ArielLaub")
-                            name.set("Ariel Laub")
-                        }
-                    }
-                    scm {
-                        url.set("https://github.com/ArielLaub/protobus-java")
-                        connection.set("scm:git:https://github.com/ArielLaub/protobus-java.git")
-                    }
+    apply(plugin = "com.vanniktech.maven.publish.base")
+    extensions.configure<com.vanniktech.maven.publish.MavenPublishBaseExtension> {
+        configure(com.vanniktech.maven.publish.JavaLibrary(
+            javadocJar = com.vanniktech.maven.publish.JavadocJar.Javadoc(),
+            sourcesJar = true,
+        ))
+        coordinates(project.group.toString(), project.name, project.version.toString())
+        // Uploaded to the portal and left for a person to release from there.
+        publishToMavenCentral()
+        if (providers.gradleProperty("signingInMemoryKey").isPresent) signAllPublications()
+        pom {
+            name.set(project.name)
+            // Read late: each module's own build file sets its description after this.
+            description.set(provider { project.description })
+            url.set("https://github.com/ArielLaub/protobus-java")
+            inceptionYear.set("2026")
+            licenses {
+                license {
+                    name.set("MIT License")
+                    url.set("https://opensource.org/licenses/MIT")
+                    distribution.set("repo")
                 }
             }
+            developers {
+                developer {
+                    id.set("ArielLaub")
+                    name.set("Ariel Laub")
+                    url.set("https://github.com/ArielLaub")
+                }
+            }
+            scm {
+                url.set("https://github.com/ArielLaub/protobus-java")
+                connection.set("scm:git:https://github.com/ArielLaub/protobus-java.git")
+                developerConnection.set("scm:git:ssh://git@github.com/ArielLaub/protobus-java.git")
+            }
         }
+    }
+    extensions.configure<PublishingExtension> {
         repositories {
             // Used by the Gradle plugin's functional test.
             maven {

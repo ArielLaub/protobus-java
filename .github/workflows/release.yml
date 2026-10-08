@@ -1,0 +1,64 @@
+name: release
+
+# A tag vX.Y.Z publishes protobus and protobus-codegen X.Y.Z to Maven Central,
+# after the whole CI has passed on it. The deployment is uploaded to the
+# Central Portal and waits there: release it (or drop it) by hand at
+# https://central.sonatype.com/publishing/deployments.
+#
+# Run it by hand ("Run workflow") for a dry run: everything is built and
+# signed with the real key, the signatures are verified, and nothing leaves
+# the runner.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: ${{ github.event_name == 'push' && 'publish to Maven Central' || 'dry run (sign and verify only)' }}
+    needs: ci
+    runs-on: ubuntu-24.04
+    env:
+      ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+      ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+      ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+      ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      - name: version
+        id: version
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = push ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(sed -n 's/^version=//p' gradle.properties | sed 's/-SNAPSHOT$//')-dryrun"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "publishing version $v"
+      - name: sign and verify (dry run)
+        if: github.event_name != 'push'
+        run: |
+          ./gradlew :protobus:publishAllPublicationsToTestRepoRepository \
+            :protobus-codegen:publishAllPublicationsToTestRepoRepository -Pversion=${{ steps.version.outputs.version }}
+          echo "$ORG_GRADLE_PROJECT_signingInMemoryKey" | gpg --batch --import 2>/dev/null || true
+          n=0
+          for f in $(find build/test-repo -name '*.jar' -o -name '*.pom' -o -name '*.module' | grep -- "-dryrun"); do
+            gpg --batch --verify "$f.asc" "$f" 2>/dev/null || { echo "BAD or missing signature: $f"; exit 1; }
+            n=$((n+1))
+          done
+          echo "$n artifacts signed and verified"
+          [ "$n" -ge 10 ]
+      - name: upload to the Central Portal
+        if: github.event_name == 'push'
+        run: ./gradlew publishToMavenCentral -Pversion=${{ steps.version.outputs.version }}

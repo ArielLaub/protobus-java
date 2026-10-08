@@ -9,6 +9,7 @@ amqp = "5.37.0"
 slf4j = "2.0.17"
 junit = "5.14.4"
 protobufPlugin = "0.9.6"
+mavenPublish = "0.37.0"
 
 [libraries]
 protobuf-java = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
@@ -20,3 +21,4 @@ junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 
 [plugins]
 protobuf = { id = "com.google.protobuf", version.ref = "protobufPlugin" }
+mavenPublish = { id = "com.vanniktech.maven.publish.base", version.ref = "mavenPublish" }
