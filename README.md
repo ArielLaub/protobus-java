@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ArielLaub/protobus-java/main/docs/assets/banner.jpg" alt="ProtoBus: many languages, one message bus. A thin layer over Protocol Buffers and RabbitMQ." width="100%">
+</p>
+
 # ProtoBus for Java
 
 **RabbitMQ-native microservices for the JVM, with Protocol Buffers on the wire.**
@@ -17,8 +21,7 @@ This is the Java port of [protobus](https://github.com/ArielLaub/protobus)
 ports are **wire-compatible**: a Java service serves callers written for any of
 them and the other way round, with streaming, events, custom types and error
 codes included. They are listed under
-[Other languages](docs/README.md#other-languages); see also
-[Compatibility](docs/compatibility.md).
+[Wire compatibility](#wire-compatibility).
 
 **Status: new.** 2.0.0 is the first release of the Java port. Its runtime is at
 feature parity with the TypeScript port's, and its CI runs it against the TypeScript,
@@ -403,12 +406,22 @@ create one context per process and share it. See
 ## Wire compatibility
 
 protobus-java speaks the protobus wire protocol exactly as TypeScript protobus
-2.5 and the [other ports](docs/README.md#other-languages) do: the same
+2.5 and the other ports do: the same
 exchanges, queues, envelopes (byte for byte), headers and error codes, and the
 same environment variables for configuration. Replicas of one service in
 different languages can share its queue and climb one retry ladder together.
 The [cross-language suite](crosslang/README.md) runs Java against the other
 ports' real libraries over a real broker, in both directions.
+
+| Language | Repo | Status |
+|---|---|---|
+| TypeScript | [protobus](https://github.com/ArielLaub/protobus) | stable (reference) |
+| Python | [protobus-py](https://github.com/ArielLaub/protobus-py) | stable |
+| Go | [protobus-go](https://github.com/ArielLaub/protobus-go) | stable |
+| C++ | [protobus-cpp](https://github.com/ArielLaub/protobus-cpp) | new |
+| Java | [protobus-java](https://github.com/ArielLaub/protobus-java) (this repository) | new |
+| C# | [protobus-csharp](https://github.com/ArielLaub/protobus-csharp) | new |
+| Rust | [protobus-rs](https://github.com/ArielLaub/protobus-rs) | new |
 
 The type mapping, the topology and the few deliberate behavioural differences
 are in **[Compatibility](docs/compatibility.md)**.
