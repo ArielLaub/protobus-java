@@ -1,18 +1,16 @@
-# Compatibility with the TypeScript, Python, Go and C++ ports
+# Compatibility with the other ports
 
-protobus-java speaks the protobus wire protocol exactly as
-[protobus](https://github.com/ArielLaub/protobus) (TypeScript, 2.5),
-[protobus-py](https://github.com/ArielLaub/protobus-py) (2.0),
-[protobus-go](https://github.com/ArielLaub/protobus-go) (2.0) and
-[protobus-cpp](https://github.com/ArielLaub/protobus-cpp) (2.0) do. Services
-and clients in all five languages can share one broker, one schema and even
+protobus-java speaks the protobus wire protocol exactly as the TypeScript
+reference (2.5) and the other ports (2.0) do; they are listed under
+[Other languages](README.md#other-languages). Services and clients in every
+one of them can share one broker, one schema and even
 one queue: replicas of a service in different languages compete for its
 requests and climb one retry ladder together.
 
 This is tested: the [cross-language suite](../crosslang/README.md) runs Java
-against the other ports' real libraries over a real broker, in both
-directions, and runs `interop.Flaky` in all five languages at once on one
-queue.
+against the TypeScript, Python, Go and C++ ports' real libraries over a real
+broker, in both directions, and runs `interop.Flaky` in those five languages
+at once on one queue.
 
 ## The contract is the `.proto`
 
